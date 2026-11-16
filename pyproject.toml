@@ -7,8 +7,10 @@ license = "Apache-2.0"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "asyncpg>=0.32.0",
+    "deepagents>=0.7.38",
     "fastapi>=0.163.1",
     "httpx>=0.28.1",
+    "langchain-ollama>=1.1.0",
     "microsandbox==0.7.15",
     "uvicorn[standard]>=0.54.0",
     "websockets>=17.4",
@@ -30,6 +32,7 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
+    "hypothesis>=6.170.15",
 ]
 
 [tool.ruff]
@@ -47,4 +50,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: needs microsandbox and network (run with make test-integration)"]
+testpaths = ["tests"]  # fixtures/ holds repos with failing tests on purpose
+markers = [
+    "integration: needs microsandbox and network (run with make test-integration)",
+    "slow: drives a real model through Ollama on the host (minutes, not seconds)",
+    "chaos: kills the API process mid-run (run with make test-chaos)",
+]

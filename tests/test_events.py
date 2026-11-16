@@ -1,12 +1,11 @@
 import asyncio
 import uuid
-from datetime import UTC, datetime
 
 import asyncpg
 import pytest
 
 from lab import events
-from lab.events import ConcurrentWriterError, Event, Message
+from lab.events import ConcurrentWriterError
 
 
 async def test_append_is_gapless(pool: asyncpg.Pool) -> None:
@@ -51,28 +50,25 @@ async def test_second_writer_fails_instead_of_waiting(pool: asyncpg.Pool) -> Non
     assert await events.append(pool, sid, "user_message", {}) == 1
 
 
-def _event(seq: int, type: str, **payload: object) -> Event:
-    sid = uuid.UUID(int=1)
-    return Event(sid, seq, type, dict(payload), None, datetime.now(UTC))
-
-
-def test_fold_state() -> None:
-    log = [
-        _event(1, "session_created", repo_url="https://example.org/r.git", harness="scripted"),
-        _event(2, "user_message", text="hi"),
-        _event(3, "run_started", run_id="r1", harness="scripted"),
-        _event(4, "sandbox_attached", name="lab-x"),
-        _event(5, "tool_call", id="c1", name="shell", args={"command": "ls"}),
+async def test_fork_copies_the_prefix_atomically(pool: asyncpg.Pool) -> None:
+    source, target = uuid.uuid4(), uuid.uuid4()
+    for i in range(5):
+        await events.append(pool, source, "user_message", {"text": str(i)}, idem_key=f"k{i}")
+    assert await events.fork(pool, source, target, 3) == 4
+    copied = await events.read(pool, target)
+    assert [(e.seq, e.type, e.payload, e.idem_key) for e in copied[:3]] == [
+        (e.seq, e.type, e.payload, e.idem_key) for e in (await events.read(pool, source))[:3]
     ]
-    state = events.fold_state(log)
-    assert (state.status, state.run_id, state.sandbox, state.last_seq) == (
-        "running",
-        "r1",
-        "lab-x",
-        5,
-    )
-    log += [_event(6, "agent_message", text="hello"), _event(7, "run_finished")]
-    state = events.fold_state(log)
-    assert (state.status, state.run_id, state.harness) == ("idle", None, "scripted")
-    assert state.transcript == [Message("user", "hi"), Message("assistant", "hello")]
-    assert events.fold_state(log) == state  # deterministic
+    assert copied[3].type == "forked_from"
+    assert copied[3].payload == {"session_id": str(source), "at_seq": 3}
+    assert await events.append(pool, target, "user_message", {"text": "x"}) == 5
+    assert len(await events.read(pool, source)) == 5  # the source is untouched
+
+
+async def test_open_sessions(pool: asyncpg.Pool) -> None:
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for sid in (a, b, c):
+        await events.append(pool, sid, "session_created", {})
+    await events.append(pool, b, "session_closed", {})
+    await events.append(pool, c, "session_failed", {})
+    assert await events.open_sessions(pool) == [a]

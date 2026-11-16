@@ -2,7 +2,7 @@
 
 A small lab for coding agents that run in per-chat microVMs ([microsandbox](https://github.com/superradcompany/microsandbox)), behind a session layer whose single source of truth is an append-only event log in PostgreSQL.
 
-Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer now runs one chat end to end with a scripted (fake) agent: a session gets its own VM with a clone of the repo, the agent runs inside it, and every durable event lands in the log and streams to clients.
+Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer runs a chat end to end: a session gets its own VM with a copy of the repo, an agent works on it, and every durable event lands in the log and streams to clients. Two harnesses exist so far: a real coding agent (deepagents on a local Ollama model, loop on the host, tools in a VM without network) and a scripted fake agent that runs inside the VM, for tests. A session survives a `kill -9` of the API: on restart every open session is reconciled with its VM and with the event file the in-VM runner keeps, and a chat can be forked at any event between runs.
 
 ## Architecture
 
@@ -18,23 +18,71 @@ flowchart LR
         PG -->|"pg_notify {session_id, seq}"| FO[Fan-out<br/>one LISTEN connection]
         FO --> API
         SR -.->|agent_delta, memory only| FO
+        SR --> DA[deepagents loop<br/>harness A, in the API process]
+        DA -->|model calls| OL[Ollama on 127.0.0.1<br/>Gemma 4]
     end
-    subgraph VM["microVM, one per session (detached)"]
-        RUN[runner.py<br/>scripted harness] --> JL["/lab/runs/RUN_ID.jsonl"]
-        RUN --> REPO["/lab/repo<br/>clone of the repo"]
+    subgraph VMA["microVM for harness A (detached, no network)"]
+        REPOA["/lab/repo<br/>copy of the repo"]
     end
-    SR -->|exec_stream: task JSON| RUN
-    RUN -->|JSONL events on stdout| SR
+    subgraph VMS["microVM for the scripted harness (detached)"]
+        RUN[runner.py] --> JL["/lab/runs/RUN_ID.jsonl"]
+        RUN --> REPOS["/lab/repo"]
+    end
+    DA -->|"one sb.exec per tool call"| REPOA
+    SR -->|"exec_detached job: task JSON"| RUN
+    RUN -->|JSONL events on stdout, job log| SR
 ```
 
-Each session gets its own microVM with a clone of the repo. The API hands a user message to the session's runner task, the only process allowed to write that session's events. The runner starts `runner.py` inside the VM, which writes every durable event to a file in the VM first and then prints it. The session runner appends those events to PostgreSQL, and a single `LISTEN` connection wakes the WebSocket subscribers, who read the new rows from the log. The log is the single source of truth: session state is a fold over its events. Token-by-token deltas (`agent_delta`) only go to live clients and are never stored. The VM is detached, so it keeps running if the API restarts, and the next message reattaches to it.
+Each session gets its own microVM with a copy of the repo. The repo is cloned (or, for a local fixture, archived) on the host and copied in, so a VM never needs network to get its code. The API hands a user message to the session's runner task, the only process allowed to write that session's events. The runner appends every durable event the harness produces to PostgreSQL, and a single `LISTEN` connection wakes the WebSocket subscribers, who read the new rows from the log. The log is the single source of truth: session state is a fold over its events, and each run starts from the transcript folded from it. Token-by-token deltas (`agent_delta`) only go to live clients and are never stored. The VM is detached, so it keeps running if the API restarts, and the next message reattaches to it (see [Crash recovery, resume and fork](#crash-recovery-resume-and-fork)).
+
+Harnesses sit behind one interface and declare where they run (`placement`):
+
+- **`deepagents_ollama` (placement A, `host`).** A [deepagents](https://docs.langchain.com/oss/python/deepagents/overview) loop runs inside the API process and uses a local Ollama model (default `gemma4:26b-a4b-it-mtp-q4_K_M`) on `127.0.0.1`. Its tools (read, write, edit, ls, glob, grep, shell) all run in the session's VM through `MicrosandboxBackend`, a deepagents backend where every operation is one `sb.exec` or `sb.fs` call. The VM is the agent's hands only: it is created with `Network.none()`, so it cannot reach the internet, the host or Ollama. LangGraph's message stream becomes live `agent_delta` events; tool calls, tool results and the final answer become durable events, and `run_finished` carries the token counts. There is no LangGraph checkpointer; the event log is the only memory.
+- **`scripted` (placement `sandbox`).** A deterministic fake agent that runs as `runner.py` inside the VM. It writes every durable event to a file in the VM first and then prints it, the path the in-VM harness (B) will use. The runner is a microsandbox managed job (`exec_detached`), not an `exec_stream`: a process started with `exec_stream` dies with the host process that started it, while a job keeps running when the API dies and its output can be followed again after a restart. It installs pytest, so its VM keeps the default public network.
+
+Every run has limits (see [Configuration](#configuration)): a wall-time limit, a per-command timeout in the VM, and a maximum number of tool calls. A run that hits one ends with `run_failed{reason: "timeout"}` or `run_failed{reason: "max_tool_calls"}`.
+
+### Crash recovery, resume and fork
+
+Three explicit state machines (`src/lab/state.py`) are folded from the log, and an event that a machine does not allow in its current state raises an error instead of being folded silently:
+
+- session: `created`, `ready`, `running`, `idle`, `closed`, plus `failed` (the repo could not be set up for a new session);
+- sandbox: `none`, `provisioning`, `attached`, `lost`, `destroyed`;
+- run: `queued`, `running`, then `finished`, `failed` or `interrupted`.
+
+The VM's lifecycle is in the log too (`sandbox_provisioning`, `sandbox_attached`, `sandbox_lost`, `sandbox_destroyed`), so a VM that was half set up when the API died is never reused. After every run the session runner saves the VM's working tree as a binary patch against the starting commit (`workspace_saved`). A lost VM, or a fork that cannot copy a live VM, is rebuilt from the repo (an https clone is checked out at the same commit) plus that patch.
+
+When the API starts, every open session's runner task first reconciles its session, before it takes new messages, so it stays the only writer:
+
+```mermaid
+flowchart TD
+    S[API starts: one runner per open session] --> V{VM in the log<br/>still running?}
+    V -->|yes| R
+    V -->|no| L[append sandbox_lost<br/>next run rebuilds the VM] --> R
+    R{run was running?} -->|no| Q
+    R -->|"host harness (loop died with the API)"| I[append run_interrupted]
+    R -->|in-VM harness| F[append the events in runs/RUN_ID.jsonl<br/>that the log lacks]
+    F --> J{runner job alive?}
+    J -->|yes| FO[follow its output to the end] --> T
+    J -->|no| T{terminal event?}
+    T -->|no| I
+    T -->|yes| Q
+    I --> Q{last message unanswered,<br/>run at most once so far?}
+    Q -->|yes| RR[run it again on the transcript from the log]
+    Q -->|no| D[take new messages]
+    RR --> D
+```
+
+Events from the runner carry `idem_key = <run_id>:<rseq>`, so reading the same file twice, or the file and then the job's output, never appends an event twice. A message is re-run at most once after an interruption, and never if the interrupted run already answered it: a second answer is worse than none. The chaos tests (`make test-chaos`) `kill -9` the API mid-run for both placements and check the result; Hypothesis checks the invariants (never two running runs, gapless seq, at most one answer per message, deterministic fold) over random interleavings of messages, agent steps, crashes and restarts. Measured recovery times are in [docs/spike-results.md](docs/spike-results.md#crash-recovery).
+
+`POST /sessions/{id}/fork {at_seq}` creates a new session whose log is the source's up to `at_seq` plus `forked_from`, copied in one transaction, and gives it its own VM. At the source's head, with an in-VM harness and a running source VM, that VM is a copy-on-write `fork()` of the source's (memory and disk). Otherwise it is rebuilt from the repo plus the workspace patch saved at or before `at_seq`; this is always the case for `deepagents_ollama`, because microsandbox refuses to fork a VM with the `Network.none()` policy. A fork in the middle of a run is refused with 409. `DELETE /sessions/{id}` destroys the VM and closes the session; closed sessions are not reconciled.
 
 ### Where it is going
 
 ```mermaid
 flowchart TB
     API[FastAPI + session runner + event log<br/>built]
-    subgraph A["Placement A: harness on the host (planned)"]
+    subgraph A["Placement A: harness on the host (built)"]
         DA[deepagents loop<br/>inside the API process] --> OL[Ollama on 127.0.0.1<br/>Gemma 4]
         DA -->|one sb.exec per tool call| VMA[microVM<br/>Network.none, tools only]
     end
@@ -43,16 +91,17 @@ flowchart TB
         PX --> DS[DeepSeek API]
     end
     API --> DA
-    API -->|exec_stream| VMB
+    API -->|runner job| VMB
 ```
 
-Two real agent harnesses will sit behind the same interface, each placed where its vendor designed it to run. In A, the deepagents loop runs on the host with a local model, and only its tool calls run in a VM that has no network. In B, the Claude Code CLI runs inside the VM. It uses DeepSeek through its Anthropic-compatible API, and the VM never sees the API key: microsandbox's proxy swaps a placeholder for the real key on requests to the DeepSeek host only. The spikes checked the pieces both rely on: a VM with no network, the per-call `exec` cost, and the secret proxy with the CLI ([docs/spike-results.md](docs/spike-results.md)).
+Two real agent harnesses will sit behind the same interface, each placed where its vendor designed it to run. A is built: the deepagents loop runs on the host with a local model, and only its tool calls run in a VM that has no network. In B, the Claude Code CLI will run inside the VM. It uses DeepSeek through its Anthropic-compatible API, and the VM never sees the API key: microsandbox's proxy swaps a placeholder for the real key on requests to the DeepSeek host only. The spikes checked the pieces both rely on: a VM with no network, the per-call `exec` cost, and the secret proxy with the CLI ([docs/spike-results.md](docs/spike-results.md)).
 
 ## Requirements
 
 - Apple Silicon Mac, [uv](https://docs.astral.sh/uv/)
 - Python 3.13 (`uv python install 3.13`)
 - Docker (for example OrbStack) to run PostgreSQL 18 from `compose.yaml`
+- [Ollama](https://ollama.com) on its default `127.0.0.1:11434` with the model in `LAB_OLLAMA_MODEL` pulled (default `gemma4:26b-a4b-it-mtp-q4_K_M`, about 18 GB) for the `deepagents_ollama` harness
 - For the network spike: `DEEPSEEK_API_KEY` in the environment
 - If the Mac runs an outbound firewall (for example LuLu), allow `.venv/lib/python3.13/site-packages/microsandbox/_bundled/bin/msb`. All guest traffic leaves through that binary.
 
@@ -67,7 +116,8 @@ make migrate           # apply migrations/*.sql
 make api               # run the session API on http://127.0.0.1:8000
 make lint              # ruff (lint and format check) and mypy
 make test              # unit tests (need Postgres, use their own lab_test database)
-make test-integration  # end-to-end tests with real microVMs (need network)
+make test-integration  # end-to-end tests with real microVMs (need network; the slow agent test needs Ollama, skipped without it)
+make test-chaos        # kill -9 the API mid-run and restart it, per placement; prints recovery times (the host case needs Ollama)
 make spike             # run the three spikes in order
 make check-names       # fail if a tracked file matches a pattern in the local .names-denylist
 ```
@@ -75,12 +125,28 @@ make check-names       # fail if a tracked file matches a pattern in the local .
 A chat from the command line, with `make api` running in another terminal:
 
 ```sh
-uv run lab new https://github.com/pallets/markupsafe   # prints the session id
-uv run lab tail <session_id>                           # stream events (Ctrl-C to stop)
-uv run lab say <session_id> "Do the tests pass?"       # in a third terminal
+uv run lab new fixtures/calc-repo --harness deepagents_ollama   # prints the session id
+uv run lab tail <session_id>                                    # stream events (Ctrl-C to stop)
+uv run lab say <session_id> "One test fails. Fix the code."     # in a third terminal
 ```
 
-The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. Only `scripted` exists as a harness so far.
+The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `POST /sessions/{id}/fork {at_seq}` (201), `DELETE /sessions/{id}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. A message or a close for a closed or failed session gets 409. Harnesses: `deepagents_ollama` and `scripted` (the default). `repo_url` is an `https://` git URL or a directory under `fixtures/`; other schemes are refused, because the clone runs on the host. The `deepagents_ollama` VM has no network, so nothing can be installed in it: the stock `python:3.13` image has no pytest, and a real repo's test dependencies are missing. The `calc-repo` fixture uses `unittest` for that reason; a lab image with test tools baked in comes later.
+
+## Configuration
+
+Read from the environment when the API starts (`src/lab/config.py`).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LAB_DATABASE_URL` | `postgresql://lab:lab@127.0.0.1:55432/lab` | Event log database |
+| `LAB_VM_CPUS` | `1` | vCPUs per session VM |
+| `LAB_VM_MEMORY_MIB` | `512` | Memory limit per session VM |
+| `LAB_RUN_TIMEOUT_S` | `900` | Wall time of one run, including VM creation; then `run_failed{reason: "timeout"}` |
+| `LAB_EXEC_TIMEOUT_S` | `120` | One command in the VM; the agent sees exit code 124 and a timeout message |
+| `LAB_MAX_TOOL_CALLS` | `50` | Tool calls per run (`deepagents_ollama`); then `run_failed{reason: "max_tool_calls"}` |
+| `LAB_OLLAMA_MODEL` | `gemma4:26b-a4b-it-mtp-q4_K_M` | Ollama model of `deepagents_ollama` (`qwen3-coder:30b` is the coding-tuned alternative) |
+| `LAB_OLLAMA_NUM_CTX` | `65536` | Context window requested from Ollama (it advises 32k or more for tool calling) |
+| `LAB_SCRIPTED_STEP_DELAY_S` | `0` | Pause before each step of the `scripted` agent, so the chaos tests can kill the API mid-run |
 
 ## Project structure
 
@@ -90,13 +156,14 @@ The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {te
 | `Makefile` | The commands above |
 | `compose.yaml` | PostgreSQL 18 for the event log |
 | `migrations/` | SQL migrations, applied in file name order by `make migrate` |
-| `src/lab/` | The lab package: event store (`events.py`), live fan-out (`fanout.py`), sandbox manager (`sandbox.py`), per-session runner task (`session.py`), API (`api.py`), CLI (`cli.py`) |
-| `src/lab/harnesses/` | Agent harnesses behind one interface, plus the registry |
+| `src/lab/` | The lab package: event store (`events.py`), live fan-out (`fanout.py`), sandbox manager (`sandbox.py`), per-session runner task and fork (`session.py`), state machines (`state.py`), startup reconciliation (`recovery.py`), API (`api.py`), CLI (`cli.py`), limits and model settings (`config.py`) |
+| `src/lab/harnesses/` | Agent harnesses behind one interface, plus the registry: `deepagents_ollama.py` (placement A), its VM backend `microsandbox_backend.py`, and `scripted.py` |
 | `src/lab/runner/runner.py` | Copied into each VM; runs the in-VM agent, JSON task in, JSONL events out |
-| `tests/` | Unit tests; `tests/integration/` runs real microVMs |
+| `tests/` | Unit tests, including Hypothesis properties of the state machines under crashes (`test_state_properties.py`); `tests/integration/` runs real microVMs (and, marked `slow`, a real model through Ollama; marked `chaos`, kills of the API process) |
+| `fixtures/calc-repo/` | A tiny Python package with one failing test, used as a repo by the agent tests. Copied into VMs as a single-commit git repo |
 | `spikes/` | Throwaway experiments that answer one question each before the real code is written |
 | `spikes/out/` | Raw spike output (JSON and cached downloads). Gitignored |
-| `docs/spike-results.md` | Curated spike numbers and the decisions they drove |
+| `docs/spike-results.md` | Curated spike numbers and the decisions they drove, plus the measured crash recovery times |
 | `scripts/check_names.sh` | Name check used by `make check-names` |
 | `.names-denylist` | Local regex list for the name check. Gitignored, never committed |
 | `~/.microsandbox/` | Outside the repo: microsandbox's image cache, sandbox database and CA. Created by the SDK |

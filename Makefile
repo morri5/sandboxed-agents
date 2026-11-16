@@ -1,4 +1,4 @@
-.PHONY: lint test test-integration spike check-names db-up migrate api
+.PHONY: lint test test-integration test-chaos spike check-names db-up migrate api
 
 PY_SOURCES := spikes src tests
 
@@ -14,7 +14,11 @@ test: db-up
 
 # Real microVMs (needs network for the image pull and the git clone).
 test-integration: db-up
-	uv run pytest -m integration
+	uv run pytest -m "integration and not chaos"
+
+# Kills the API with SIGKILL mid-run and restarts it; prints the recovery times.
+test-chaos: db-up
+	uv run pytest -m chaos -s
 
 # Each spike prints its measurements and writes spikes/out/<spike>.json.
 # The network spike needs DEEPSEEK_API_KEY in the environment.

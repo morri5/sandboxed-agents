@@ -111,3 +111,22 @@ Ollama listened only on `127.0.0.1:11434` throughout; no host configuration was 
 | `host` rule for TCP port 11434 only, to `host.microsandbox.internal` | Works: `GET /api/tags` returns 200 |
 
 Both paths work, so B-local stays possible.
+
+## Crash recovery
+
+Measured on 2026-11-16 with `make test-chaos`, three runs. Each test `kill -9`s the API process in the middle of a run (right after the first durable `tool_call`), restarts it on the same port and watches the log in Postgres. Times count from the moment the new process is started.
+
+| Case | API answers HTTP | Recovery in the log | Outcome |
+|---|---|---|---|
+| In-VM runner (`scripted`), runner still alive | 0.44 to 0.45 s | 3 events the runner wrote while the API was down ingested after 0.54 to 0.55 s; the reconciler then followed the runner to its end (3.7 to 3.8 s) | One run, one answer, every file event in the log exactly once, no re-run |
+| In-VM runner, runner job killed while the API was down | 0.44 s | `run_interrupted{reason: "runner_lost"}` already in the log when the API answered (0.44 s) | The events written before the kill are kept; the message is re-run once; one answer |
+| Host loop (`deepagents_ollama`, Gemma 4) | 0.44 to 0.45 s | `run_interrupted{reason: "api_restart"}` already in the log when the API answered (0.44 to 0.45 s) | The message is re-run once on the transcript from the log, against the same VM; one answer |
+
+The reconciliation itself (fold, reattach the VM, close the run) took 13 to 17 ms per session when no runner had to be followed, from the API's own log line. The poll interval of the tests is 0.1 s, so the times above have that resolution.
+
+Two microsandbox behaviours found while building this (0.7.15):
+
+| Question | Result |
+|---|---|
+| Does a process started with `exec_stream` survive a `kill -9` of the host process that started it? | **No.** It stops at once (a loop writing a file every 0.5 s stopped at the kill). A managed job started with `exec_detached` keeps running, its stdin works, `follow_logs()` replays its output from the start and ends when it exits, and `inspect()` reports its state and exit code. The in-VM runner therefore runs as a job. |
+| Can `fork()` copy a VM created with `Network.none()`? | **No.** It raises `InvalidConfigError` ("source uses host-backed proxy, TLS or secret resources"). A VM with the default network forks in about 0.3 s (one measurement), and the fork kept running after the process that created it exited. Forks of host-placement sessions are therefore rebuilt from the repo plus the saved workspace patch. |

@@ -16,7 +16,8 @@ from lab import events
 from lab.db import DATABASE_URL, create_pool
 from lab.fanout import FanOut
 from lab.harnesses import HARNESSES
-from lab.session import SessionRunner
+from lab.session import SessionRunner, fork_session
+from lab.state import OPEN, fold
 
 
 class NewSession(BaseModel):
@@ -29,6 +30,10 @@ class NewMessage(BaseModel):
     idem_key: str
 
 
+class Fork(BaseModel):
+    at_seq: int
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await create_pool(DATABASE_URL)
@@ -36,7 +41,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await fanout.start()
     app.state.pool = pool
     app.state.fanout = fanout
-    app.state.runners = {}
+    # Every open session gets its runner now; each one first reconciles its session
+    # with what survived (VM, runner event file), in the background.
+    app.state.runners = {
+        sid: SessionRunner(pool, fanout, sid) for sid in await events.open_sessions(pool)
+    }
     try:
         yield
     finally:
@@ -74,11 +83,39 @@ async def create_session(body: NewSession, request: Request) -> dict[str, Any]:
     return {"session_id": str(session_id)}
 
 
+async def _open_runner(request: Request, session_id: UUID) -> SessionRunner:
+    runner = await _runner(request, session_id)
+    state = fold(await events.read(request.app.state.pool, session_id))
+    if state.session not in (*OPEN, "running"):
+        raise HTTPException(409, f"session is {state.session}")
+    return runner
+
+
 @app.post("/sessions/{session_id}/messages", status_code=202)
 async def send_message(session_id: UUID, body: NewMessage, request: Request) -> dict[str, Any]:
-    runner = await _runner(request, session_id)
+    runner = await _open_runner(request, session_id)
     runner.submit(body.text, body.idem_key)
     return {"accepted": True, "idem_key": body.idem_key}
+
+
+@app.post("/sessions/{session_id}/fork", status_code=201)
+async def fork(session_id: UUID, body: Fork, request: Request) -> dict[str, Any]:
+    try:
+        fork_id = await fork_session(request.app.state.pool, session_id, body.at_seq)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await _runner(request, fork_id)  # from here on, the fork's runner is its only writer
+    return {"session_id": str(fork_id)}
+
+
+@app.delete("/sessions/{session_id}", status_code=202)
+async def close_session(session_id: UUID, request: Request) -> dict[str, Any]:
+    """Queued behind any pending message: the VM is destroyed and the session closed."""
+    runner = await _open_runner(request, session_id)
+    runner.close()
+    return {"accepted": True}
 
 
 @app.get("/sessions/{session_id}/events")

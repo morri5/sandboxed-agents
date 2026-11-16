@@ -1,4 +1,4 @@
-"""The append-only event log: append, read, and fold into session state.
+"""The append-only event log: append, read, and fork (the fold lives in `state.py`).
 
 One writer per session: an append takes a transaction-scoped advisory try-lock on
 the session and raises `ConcurrentWriterError` if another transaction holds it,
@@ -7,7 +7,7 @@ is `max(seq) + 1`; the primary key `(session_id, seq)` is the last guard.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -62,18 +62,6 @@ class AgentEvent:
     rseq: int | None = None
 
 
-@dataclass
-class SessionState:
-    session_id: UUID | None = None
-    repo_url: str | None = None
-    harness: str | None = None
-    sandbox: str | None = None  # name of the attached microsandbox VM
-    run_id: str | None = None  # the run in progress, if any
-    status: str = "none"  # none, ready, running, idle
-    last_seq: int = 0
-    transcript: list[Message] = field(default_factory=list)
-
-
 def lock_key(session_id: UUID) -> int:
     """64-bit advisory lock key from the uuid's last 8 bytes.
 
@@ -96,8 +84,7 @@ async def append(
     and the seq of the existing event is returned.
     """
     async with pool.acquire() as conn, conn.transaction():
-        if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", lock_key(session_id)):
-            raise ConcurrentWriterError(f"session {session_id} has another writer")
+        await _lock(conn, session_id)
         seq: int | None = await conn.fetchval(
             """
             INSERT INTO events (session_id, seq, type, payload, idem_key)
@@ -117,9 +104,49 @@ async def append(
                 idem_key,
             )
             return existing
-        # Only the address goes through NOTIFY (payload limit 8000 bytes); listeners read the row.
-        note = json.dumps({"session_id": str(session_id), "seq": seq})
-        await conn.execute("SELECT pg_notify($1, $2)", CHANNEL, note)
+        await _notify(conn, session_id, seq)
+        return seq
+
+
+async def _lock(conn: Any, session_id: UUID) -> None:
+    if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", lock_key(session_id)):
+        raise ConcurrentWriterError(f"session {session_id} has another writer")
+
+
+async def _notify(conn: Any, session_id: UUID, seq: int) -> None:
+    # Only the address goes through NOTIFY (payload limit 8000 bytes); listeners read the row.
+    note = json.dumps({"session_id": str(session_id), "seq": seq})
+    await conn.execute("SELECT pg_notify($1, $2)", CHANNEL, note)
+
+
+async def fork(pool: asyncpg.Pool, source: UUID, target: UUID, at_seq: int) -> int:
+    """Start session `target` as a copy of `source` up to `at_seq`, plus `forked_from`.
+
+    One transaction: a fork never exists without its `forked_from`, which tells the
+    fold that the copied VM history belongs to the source. Returns its seq.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await _lock(conn, target)
+        await conn.execute(
+            """
+            INSERT INTO events (session_id, seq, type, payload, idem_key, created_at)
+            SELECT $2, seq, type, payload, idem_key, created_at FROM events
+            WHERE session_id = $1 AND seq <= $3
+            """,
+            source,
+            target,
+            at_seq,
+        )
+        seq = at_seq + 1
+        payload = {"session_id": str(source), "at_seq": at_seq}
+        await conn.execute(
+            "INSERT INTO events (session_id, seq, type, payload) VALUES ($1, $2, $3, $4)",
+            target,
+            seq,
+            "forked_from",
+            payload,
+        )
+        await _notify(conn, target, seq)
         return seq
 
 
@@ -132,28 +159,13 @@ async def read(pool: asyncpg.Pool, session_id: UUID, after_seq: int = 0) -> list
     return [Event(**dict(row)) for row in rows]
 
 
-def fold_state(events: list[Event]) -> SessionState:
-    """Session state is a pure fold over the log; it is never stored separately."""
-    state = SessionState()
-    for event in events:
-        state.last_seq = event.seq
-        p = event.payload
-        match event.type:
-            case "session_created":
-                state.session_id = event.session_id
-                state.repo_url = p["repo_url"]
-                state.harness = p["harness"]
-                state.status = "ready"
-            case "user_message":
-                state.transcript.append(Message("user", p["text"]))
-            case "agent_message":
-                state.transcript.append(Message("assistant", p["text"]))
-            case "sandbox_attached":
-                state.sandbox = p["name"]
-            case "run_started":
-                state.run_id = p["run_id"]
-                state.status = "running"
-            case t if t in TERMINAL_RUN_EVENTS:
-                state.run_id = None
-                state.status = "idle"
-    return state
+async def open_sessions(pool: asyncpg.Pool) -> list[UUID]:
+    """Every session that is neither closed nor failed, oldest first."""
+    rows = await pool.fetch(
+        """
+        SELECT session_id FROM events GROUP BY session_id
+        HAVING NOT bool_or(type IN ('session_closed', 'session_failed'))
+        ORDER BY session_id
+        """
+    )
+    return [row["session_id"] for row in rows]

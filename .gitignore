@@ -8,6 +8,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.hypothesis/
 
 # Raw spike output (the curated numbers live in docs/spike-results.md)
 spikes/out/

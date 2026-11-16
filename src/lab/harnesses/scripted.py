@@ -10,6 +10,7 @@ from typing import Literal
 
 from microsandbox import Sandbox
 
+from lab import config
 from lab.events import AgentEvent, Message
 from lab.sandbox import exec_runner
 
@@ -26,6 +27,7 @@ class ScriptedHarness:
             "run_id": run_id,
             "harness": self.name,
             "transcript": [asdict(m) for m in transcript],
+            "step_delay_s": config.SCRIPTED_STEP_DELAY_S,
         }
         async for event in exec_runner(sandbox, task):
             yield event

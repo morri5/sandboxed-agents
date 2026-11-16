@@ -2,13 +2,7 @@
 
 import asyncio
 import json
-import os
-import socket
-import subprocess
-import sys
-import time
 import uuid
-from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -16,45 +10,12 @@ import pytest
 import websockets
 
 from lab.sandbox import destroy
+from tests.integration.conftest import until_run_end
 
 pytestmark = pytest.mark.integration
 
 REPO = "https://github.com/pallets/markupsafe"  # small, pure pytest suite, no extra test deps
 RUN_TIMEOUT = 600  # seconds; includes the first pull of the python:3.13 image
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-@pytest.fixture
-def api(test_dsn: str) -> Iterator[str]:
-    port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "lab.api:app", "--port", str(port)],
-        env={**os.environ, "LAB_DATABASE_URL": test_dsn},
-    )
-    url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            httpx.get(f"{url}/docs").raise_for_status()
-            break
-        except httpx.HTTPError:
-            if time.monotonic() > deadline or proc.poll() is not None:
-                proc.kill()
-                raise
-            time.sleep(0.2)
-    yield url
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        raise
 
 
 async def test_scripted_chat_end_to_end(api: str) -> None:
@@ -77,7 +38,8 @@ async def test_scripted_chat_end_to_end(api: str) -> None:
                     if item["kind"] == "event" and item["type"] in ("run_finished", "run_failed"):
                         break
 
-        log = httpx.get(f"{api}/sessions/{session_id}/events").json()
+        log = until_run_end(httpx.get(f"{api}/sessions/{session_id}/events").json())
+        assert log is not None
         types = [e["type"] for e in log]
         assert types[-1] == "run_finished", log[-1]
         assert types.count("user_message") == 1

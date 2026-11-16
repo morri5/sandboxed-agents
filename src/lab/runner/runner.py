@@ -11,6 +11,7 @@ Standard library only: the VM image has Python but none of the lab's packages.
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import IO, Any
 
@@ -68,17 +69,22 @@ def read_file(emit: Emitter, call_id: str, path: str) -> str:
 def scripted(emit: Emitter, task: dict[str, Any]) -> None:
     """A deterministic fake agent: look around, read a file, run the tests, answer."""
     question = next((m["text"] for m in reversed(task["transcript"]) if m["role"] == "user"), "")
+    delay = task.get("step_delay_s", 0)  # slows the steps down, for the crash tests
+    time.sleep(delay)
     listing = shell(emit, "call-1", "ls -A")["stdout"].split()
     readmes = sorted(name for name in listing if name.lower().startswith("readme"))
     readme = readmes[0] if readmes else None
     if readme:
+        time.sleep(delay)
         read_file(emit, "call-2", readme)
+    time.sleep(delay)
     shell(
         emit,
         "call-3",
         "python -m pip install -q --disable-pip-version-check --root-user-action=ignore"
         " pytest -e .",
     )
+    time.sleep(delay)
     tests = shell(emit, "call-4", "python -m pytest -q")
     lines = tests["stdout"].strip().splitlines()
     summary = lines[-1] if lines else "no output"
@@ -96,6 +102,7 @@ HARNESSES = {"scripted": scripted}
 
 
 def main() -> None:
+    # The run id also arrives as argv[1], only so the API can find this job again.
     task = json.load(sys.stdin)
     runs = Path(task["runs_dir"])
     runs.mkdir(parents=True, exist_ok=True)

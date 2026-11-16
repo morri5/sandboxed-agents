@@ -34,17 +34,34 @@ def say(session_id: str, text: str) -> None:
     print(f"sent ({body['idem_key']})")
 
 
-def render(item: dict[str, Any]) -> str:
+MAX_RESULT_LINES = 15
+
+
+def clip(text: str) -> str:
+    """Keep long tool output readable: the first lines plus a count of the rest."""
+    lines = text.rstrip().splitlines()
+    if len(lines) <= MAX_RESULT_LINES:
+        return "\n".join(lines)
+    return "\n".join(
+        lines[:MAX_RESULT_LINES] + [f"... ({len(lines) - MAX_RESULT_LINES} more lines)"]
+    )
+
+
+def render(item: dict[str, Any], streamed: bool = False) -> str:
+    """One stream item as text. `streamed` means the agent_message was already shown as deltas."""
     if item["kind"] == "delta":
         return str(item["payload"].get("text", ""))
     p = item["payload"]
     match item["type"]:
         case "tool_call":
-            detail = json.dumps(p["args"])
-        case "tool_result" if "exit_code" in p:
-            detail = f"exit {p['exit_code']}\n{p['stdout']}{p['stderr']}".rstrip()
+            detail = f"{p['name']}({json.dumps(p['args'])})"
+        case "tool_result" if "stdout" in p:
+            detail = clip(f"exit {p['exit_code']}\n{p['stdout']}{p['stderr']}")
         case "tool_result" if "content" in p:
-            detail = p["content"][:500]
+            exit_code = f"exit {p['exit_code']}\n" if "exit_code" in p else ""
+            detail = clip(exit_code + p["content"])
+        case "agent_message" if streamed:
+            detail = "(streamed above)"
         case "user_message" | "agent_message":
             detail = p["text"]
         case _:
@@ -54,10 +71,13 @@ def render(item: dict[str, Any]) -> str:
 
 async def tail(session_id: str, after: int) -> None:
     url = f"{API_URL.replace('http', 'ws', 1)}/sessions/{session_id}/stream?after={after}"
+    streamed = False  # the previous item was a delta
     async with websockets.connect(url) as ws:
         async for message in ws:
-            sys.stdout.write(render(json.loads(message)))
+            item = json.loads(message)
+            sys.stdout.write(render(item, streamed))
             sys.stdout.flush()
+            streamed = item["kind"] == "delta"
 
 
 def main() -> None:
