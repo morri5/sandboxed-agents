@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from lab import events
 from lab.db import DATABASE_URL, create_pool
 from lab.fanout import FanOut
-from lab.harnesses import HARNESSES
+from lab.harnesses import HARNESSES, start_host_services, stop_host_services
 from lab.session import SessionRunner, fork_session
 from lab.state import OPEN, fold
 
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await fanout.start()
     app.state.pool = pool
     app.state.fanout = fanout
+    await start_host_services()  # before recovery: a runner still in a VM may need them
     # Every open session gets its runner now; each one first reconciles its session
     # with what survived (VM, runner event file), in the background.
     app.state.runners = {
@@ -60,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         for runner in app.state.runners.values():
             await runner.stop()
+        await stop_host_services()
         await fanout.close()
         await pool.close()
 

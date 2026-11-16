@@ -5,16 +5,19 @@ Every durable event gets the run id and a per-run counter `rseq`, is appended to
 The file is what survives if the API that reads stdout dies. Live `agent_delta`
 tokens go to stdout only.
 
-Two agents: `scripted`, a deterministic fake, and `claude_agent`, the Claude Agent
-SDK with DeepSeek as the brain. Standard library only, apart from the SDK, which
-only `claude_agent` VMs have (mounted read-only, see `harnesses/claude_agent.py`).
+Agents: `scripted`, a deterministic fake, and the Claude Agent SDK, with DeepSeek
+(`claude_agent`) or the host's Ollama (`claude_agent_local`) as the brain. Standard
+library only, apart from the SDK, which only those VMs have (mounted read-only, see
+`harnesses/claude_agent.py`).
 """
 
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import IO, Any
@@ -144,6 +147,42 @@ def claude_prompt(transcript: list[dict[str, str]], resume: str | None) -> str:
     )
 
 
+HOST_CID = 2  # the host, as seen over vsock
+
+
+def vsock_relay(port: int) -> int:
+    """Listen on a free loopback port and relay each connection to the host's vsock
+    `port`; returns the loopback port. The CLI only speaks TCP, and a VM without
+    a network reaches the host's Ollama bridge only over vsock."""
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def pump(src: socket.socket, dst: socket.socket) -> None:
+        try:
+            while data := src.recv(65536):
+                dst.sendall(data)
+        except OSError:
+            pass
+        finally:
+            src.close()
+            dst.close()
+
+    def serve() -> None:
+        while True:
+            client, _ = server.accept()
+            upstream = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)  # type: ignore[attr-defined]  # Linux guest only
+            try:
+                upstream.connect((HOST_CID, port))
+            except OSError:  # no bridge (the API is down): the CLI sees a closed connection
+                client.close()
+                upstream.close()
+                continue
+            threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
+            threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return int(server.getsockname()[1])
+
+
 def claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] | None:
     return asyncio.run(_claude_agent(emit, task))
 
@@ -152,9 +191,10 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     """The Claude Agent SDK on the task, as events; returns the `run_finished` payload.
 
     Cost is added up after every model turn from the usage in the turn's
-    `message_delta` stream event; over the budget the client is interrupted and the
-    run ends with `run_failed{reason: "budget"}`. `max_turns` is the hard cap in
-    case usage is missing.
+    `message_delta` stream event; over the budget (if there is one) the client is
+    interrupted and the run ends with `run_failed{reason: "budget"}`. `max_turns`
+    is the hard cap in case usage is missing. With `vsock_port` the brain is the
+    host's Ollama, reached through `vsock_relay`.
     """
     from claude_agent_sdk import (  # only claude_agent VMs have the SDK
         AssistantMessage,
@@ -168,6 +208,9 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     )
 
     model, price, budget = task["model"], task["price"], task["budget_usd"]
+    env = {"ANTHROPIC_DEFAULT_HAIKU_MODEL": model}  # background calls never ask for Claude
+    if task.get("vsock_port"):
+        env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{vsock_relay(task['vsock_port'])}"
     options = ClaudeAgentOptions(
         cwd=os.getcwd(),
         model=model,
@@ -178,7 +221,7 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
         max_turns=task["max_turns"],
         resume=task.get("resume"),
         include_partial_messages=True,
-        env={"ANTHROPIC_DEFAULT_HAIKU_MODEL": model},  # background calls never ask for Claude
+        env=env,
     )
     spent, over_budget, result = 0.0, False, None
     names: dict[str, str] = {}
@@ -192,7 +235,7 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
                     emit.delta(delta["text"])
                 elif event.get("type") == "message_delta" and not over_budget:
                     spent += usd(event.get("usage") or {}, price)
-                    if spent > budget:
+                    if budget is not None and spent > budget:
                         over_budget = True
                         await client.interrupt()
             elif isinstance(msg, AssistantMessage):
@@ -241,7 +284,7 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     return None
 
 
-HARNESSES = {"scripted": scripted, "claude_agent": claude_agent}
+HARNESSES = {"scripted": scripted, "claude_agent": claude_agent, "claude_agent_local": claude_agent}
 
 
 def main() -> None:

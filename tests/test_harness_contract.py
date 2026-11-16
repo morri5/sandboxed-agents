@@ -2,9 +2,9 @@
 or a model.
 
 `deepagents_ollama` runs its real loop with a fake chat model, and its tool calls
-go to a fake VM that answers every command. `claude_agent` runs its real host
-side and the real `runner.py` (as a local process instead of a VM job) against a
-fake `claude_agent_sdk` (`tests/fakes/claude_agent_sdk.py`).
+go to a fake VM that answers every command. `claude_agent` and `claude_agent_local`
+run their real host side and the real `runner.py` (as a local process instead of
+a VM job) against a fake `claude_agent_sdk` (`tests/fakes/claude_agent_sdk.py`).
 """
 
 import asyncio
@@ -28,6 +28,7 @@ from lab.events import TERMINAL_RUN_EVENTS, AgentEvent, Message
 from lab.harnesses import HARNESSES
 from lab.harnesses.base import CAPABILITIES, Harness
 from lab.harnesses.claude_agent import ClaudeAgentHarness
+from lab.harnesses.claude_agent_local import ClaudeAgentLocalHarness
 from lab.harnesses.deepagents_ollama import DeepAgentsOllamaHarness
 from lab.sandbox import RUNNER_HOST
 from tests.fakes import claude_agent_sdk as fake_sdk
@@ -130,6 +131,8 @@ class FakeVM:
 def _harness(name: str) -> Harness:
     if name == "deepagents_ollama":
         return DeepAgentsOllamaHarness(model=ScriptedModel())
+    if name == "claude_agent_local":
+        return ClaudeAgentLocalHarness()
     return ClaudeAgentHarness()
 
 
@@ -138,7 +141,7 @@ async def _run(harness: Harness, tmp_path: Path) -> list[AgentEvent]:
     return [ev async for ev in harness.run(TRANSCRIPT, vm, RUN_ID)]
 
 
-@pytest.mark.parametrize("name", ["deepagents_ollama", "claude_agent"])
+@pytest.mark.parametrize("name", ["deepagents_ollama", "claude_agent", "claude_agent_local"])
 async def test_harness_contract(name: str, tmp_path: Path) -> None:
     harness = _harness(name)
     assert harness.name == name and HARNESSES[name].name == name
@@ -169,12 +172,14 @@ async def test_harness_contract(name: str, tmp_path: Path) -> None:
 
     # Live tokens are deltas only, never durable.
     assert all(ev.type == "agent_delta" for ev in deltas)
-    if "streaming" in harness.capabilities and name == "claude_agent":
+    if "streaming" in harness.capabilities and name.startswith("claude_agent"):
         assert "".join(ev.payload["text"] for ev in deltas).endswith(fake_sdk.ANSWER)
 
     finished = durable[-1].payload
     if "cost_report" in harness.capabilities:
-        expected = pricing.cost_usd(config.DEEPSEEK_MODEL, finished["usage"])
+        # The local brain is free; DeepSeek is priced from `pricing.py`.
+        free = name == "claude_agent_local"
+        expected = 0.0 if free else pricing.cost_usd(config.DEEPSEEK_MODEL, finished["usage"])
         assert finished["cost_usd"] == pytest.approx(expected)
         assert finished["usage"]["input_tokens"] == 40_200
     if "native_resume" in harness.capabilities:

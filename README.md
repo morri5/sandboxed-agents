@@ -2,7 +2,7 @@
 
 A small lab for coding agents that run in per-chat microVMs ([microsandbox](https://github.com/superradcompany/microsandbox)), behind a session layer whose single source of truth is an append-only event log in PostgreSQL.
 
-Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer runs a chat end to end: a session gets its own VM with a copy of the repo, an agent works on it, and every durable event lands in the log and streams to clients. Three harnesses exist: two real coding agents, placed where their vendors designed them to run (deepagents on a local Ollama model, loop on the host and tools in a VM without network; the Claude Agent SDK inside the VM, with DeepSeek as its brain and the API key kept outside the VM), and a scripted fake agent that runs inside the VM, for tests. A chat can switch harness between messages. A session survives a `kill -9` of the API: on restart every open session is reconciled with its VM and with the event file the in-VM runner keeps, and a chat can be forked at any event between runs.
+Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer runs a chat end to end: a session gets its own VM with a copy of the repo, an agent works on it, and every durable event lands in the log and streams to clients. Four harnesses exist: three real coding agents, placed where their vendors designed them to run (deepagents on a local Ollama model, loop on the host and tools in a VM without network; the Claude Agent SDK inside the VM, with DeepSeek as its brain and the API key kept outside the VM; the same in-VM SDK with the host's Ollama as its brain, reached without any VM network), and a scripted fake agent that runs inside the VM, for tests. A chat can switch harness between messages. A session survives a `kill -9` of the API: on restart every open session is reconciled with its VM and with the event file the in-VM runner keeps, and a chat can be forked at any event between runs.
 
 ## Architecture
 
@@ -21,6 +21,7 @@ flowchart LR
         SR --> DA[deepagents loop<br/>harness A, in the API process]
         DA -->|model calls| OL[Ollama on 127.0.0.1<br/>Gemma 4]
         PX[microsandbox secret proxy<br/>holds the real DeepSeek key]
+        BR[Ollama bridge, in the API process<br/>POST /v1/messages only] -->|127.0.0.1| OL
     end
     subgraph VMA["microVM for harness A (detached, no network)"]
         REPOA["/lab/repo<br/>copy of the repo"]
@@ -30,9 +31,14 @@ flowchart LR
         RUN --> SDK[Claude Agent SDK + CLI<br/>harness B, read-only mount]
         SDK --> REPOB["/lab/repo"]
     end
+    subgraph VMC["microVM for B-local (detached, no network)"]
+        RUNC[runner.py + Claude Agent SDK<br/>loopback relay to vsock] --> REPOC["/lab/repo"]
+    end
     DA -->|"one sb.exec per tool call"| REPOA
     SR -->|"exec_detached job: task JSON"| RUN
     RUN -->|JSONL events on stdout, job log| SR
+    SR -->|"exec_detached job"| RUNC
+    RUNC -->|"vsock, through a host Unix socket"| BR
     SDK -->|"HTTPS, placeholder key"| PX
     PX -->|"real key, api.deepseek.com only"| DS[DeepSeek API<br/>Anthropic-compatible]
 ```
@@ -43,17 +49,18 @@ Harnesses sit behind one interface and declare where they run (`placement`):
 
 - **`deepagents_ollama` (placement A, `host`).** A [deepagents](https://docs.langchain.com/oss/python/deepagents/overview) loop runs inside the API process and uses a local Ollama model (default `gemma4:26b-a4b-it-mtp-q4_K_M`) on `127.0.0.1`. Its tools (read, write, edit, ls, glob, grep, shell) all run in the session's VM through `MicrosandboxBackend`, a deepagents backend where every operation is one `sb.exec` or `sb.fs` call. The VM is the agent's hands only: it is created with `Network.none()`, so it cannot reach the internet, the host or Ollama. LangGraph's message stream becomes live `agent_delta` events; tool calls, tool results and the final answer become durable events, and `run_finished` carries the token counts. There is no LangGraph checkpointer; the event log is the only memory.
 - **`claude_agent` (placement B, `sandbox`).** The [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) runs inside the VM, driven by `runner.py` with a `ClaudeSDKClient` in the repo; it uses the tools built into the bundled Claude Code CLI (Bash, Read, Edit, Write, Glob, Grep; subagents and web tools are disabled). Its brain is DeepSeek through `https://api.deepseek.com/anthropic` (model `LAB_DEEPSEEK_MODEL`, default `deepseek-flash`). The VM's network allows DNS and `api.deepseek.com` only, and the key never enters it: the guest's `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` hold the placeholder `$MSB_...`, which microsandbox's host proxy swaps for the real `DEEPSEEK_API_KEY` on requests to that host only. The SDK (with its CLI, about 380 MB) is installed once on the host for Linux arm64 (`make claude-sdk`, into `.cache/`) and mounted read-only into each of these VMs, which get 1 GiB. Text deltas from the SDK's stream become `agent_delta`; tool calls, tool results and the final answer become durable events, and `run_finished` carries the token usage and `cost_usd`.
+- **`claude_agent_local` (B-local, placement `sandbox`).** The same in-VM Claude Agent SDK and runner as `claude_agent`, with the host's Ollama model (`LAB_OLLAMA_MODEL`, the same brain as `deepagents_ollama`) as its brain, so `deepagents_ollama` against `claude_agent_local` compares two harnesses on one model. Ollama has no auth and stays on `127.0.0.1`. The VM is created with `Network.none()` (no DNS, no IP traffic) and gets one vsock port, which microsandbox connects to a Unix socket on the host (`~/.microsandbox/lab-ollama.sock`). Behind it, a small bridge in the API process passes `POST /v1/messages` (Ollama's Anthropic-compatible endpoint) to Ollama and answers 403 to everything else, so an agent in the VM cannot pull, push, create or delete models through Ollama's own API. Inside the VM the runner listens on a loopback port and relays each connection to the vsock port, because the CLI only speaks TCP. No key of any kind enters the VM (the CLI gets a dummy `ANTHROPIC_API_KEY` so it skips its login), and `run_finished.cost_usd` is 0. The bridge lives in the API process: while the API is down an in-VM run cannot reach its brain, and the restarted API serves the same socket path again, which an existing VM reaches without being recreated (tested). How the CLI copes with a model call that fails during that gap is not tested. A microsandbox `host` network rule for port 11434 also reaches Ollama (see [docs/spike-results.md](docs/spike-results.md#b-local-ollama-from-a-vm-while-it-stays-on-127001)), but it gives the VM a TCP path to Ollama's whole API, so it is not used.
 - **`scripted` (placement `sandbox`).** A deterministic fake agent that runs as `runner.py` inside the VM, for tests. It installs pytest, so its VM keeps the default public network.
 
-Both in-VM harnesses use the same runner protocol: `runner.py` writes every durable event to a file in the VM first and then prints it. The runner is a microsandbox managed job (`exec_detached`), not an `exec_stream`: a process started with `exec_stream` dies with the host process that started it, while a job keeps running when the API dies and its output can be followed again after a restart.
+All in-VM harnesses use the same runner protocol: `runner.py` writes every durable event to a file in the VM first and then prints it. The runner is a microsandbox managed job (`exec_detached`), not an `exec_stream`: a process started with `exec_stream` dies with the host process that started it, while a job keeps running when the API dies and its output can be followed again after a restart.
 
-Every run has limits (see [Configuration](#configuration)): a wall-time limit, a per-command timeout in the VM, and a maximum number of tool calls (for `claude_agent`, the SDK's `max_turns`). A run that hits one ends with `run_failed{reason: "timeout"}`, `run_failed{reason: "max_tool_calls"}` or `run_failed{reason: "max_turns"}`. `claude_agent` also has a spend limit, `LAB_MAX_USD_PER_RUN`: the runner adds up the cost after every model turn, from the usage in the turn's stream events times the DeepSeek prices in `src/lab/pricing.py`, and over the limit it interrupts the client and ends the run with `run_failed{reason: "budget"}`. The check runs at turn boundaries, so tool calls the model already issued in that turn may still run.
+Every run has limits (see [Configuration](#configuration)): a wall-time limit, a per-command timeout in the VM, and a maximum number of tool calls (for `claude_agent` and `claude_agent_local`, the SDK's `max_turns`). A run that hits one ends with `run_failed{reason: "timeout"}`, `run_failed{reason: "max_tool_calls"}` or `run_failed{reason: "max_turns"}`. `claude_agent` also has a spend limit (`claude_agent_local` is free and has none), `LAB_MAX_USD_PER_RUN`: the runner adds up the cost after every model turn, from the usage in the turn's stream events times the DeepSeek prices in `src/lab/pricing.py`, and over the limit it interrupts the client and ends the run with `run_failed{reason: "budget"}`. The check runs at turn boundaries, so tool calls the model already issued in that turn may still run.
 
 ### Harnesses behind one interface, and switching between them
 
-A harness declares its `name`, its `placement` (`host` or `sandbox`), its `capabilities` (`streaming`, `tool_use`, `native_resume`, `cost_report`, `budget`) and the VM it needs (`vm_spec()`: network policy, memory, secrets, mounts). Shared code looks harnesses up in the registry by name and checks only those declarations, never a harness's type; a unit test fails if code outside `src/lab/harnesses/` imports a harness module. A contract test runs both real harnesses with a fake model (deepagents) or a fake SDK (Claude) and checks the same rules on their event streams.
+A harness declares its `name`, its `placement` (`host` or `sandbox`), its `capabilities` (`streaming`, `tool_use`, `native_resume`, `cost_report`, `budget`) and the VM it needs (`vm_spec()`: network policy, memory, secrets, mounts, vsock ports). Shared code looks harnesses up in the registry by name and checks only those declarations, never a harness's type; a unit test fails if code outside `src/lab/harnesses/` imports a harness module. A contract test runs the three real harnesses with a fake model (deepagents) or a fake SDK (both Claude harnesses) and checks the same rules on their event streams.
 
-`POST /sessions/{id}/harness {name}` appends `harness_switched`, queued like a message. The next run uses the new harness on the transcript folded from the log (for `claude_agent`, the earlier turns go into the prompt). A VM made for another harness cannot be reused, because its network policy, secrets and mounts are fixed when it is created: it is destroyed (`sandbox_destroyed{reason: "harness_switched"}`) and rebuilt from the repo plus the saved workspace, so the edits of earlier runs carry over. A harness with `native_resume` (`claude_agent`) continues its own SDK session instead, but only when its previous run finished in the same, still running VM; anything that changes the VM or the harness drops that option, and the next run starts from the log again.
+`POST /sessions/{id}/harness {name}` appends `harness_switched`, queued like a message. The next run uses the new harness on the transcript folded from the log (for the Claude harnesses, the earlier turns go into the prompt). A VM made for another harness cannot be reused, because its network policy, secrets and mounts are fixed when it is created: it is destroyed (`sandbox_destroyed{reason: "harness_switched"}`) and rebuilt from the repo plus the saved workspace, so the edits of earlier runs carry over. A harness with `native_resume` (`claude_agent`, `claude_agent_local`) continues its own SDK session instead, but only when its previous run finished in the same, still running VM; anything that changes the VM or the harness drops that option, and the next run starts from the log again.
 
 ### DeepSeek as the brain of Claude Code
 
@@ -99,15 +106,15 @@ flowchart TD
 
 Events from the runner carry `idem_key = <run_id>:<rseq>`, so reading the same file twice, or the file and then the job's output, never appends an event twice. A message is re-run at most once after an interruption, and never if the interrupted run already answered it: a second answer is worse than none. The chaos tests (`make test-chaos`) `kill -9` the API mid-run for both placements and check the result; Hypothesis checks the invariants (never two running runs, gapless seq, at most one answer per message, deterministic fold) over random interleavings of messages, agent steps, crashes and restarts. Measured recovery times are in [docs/spike-results.md](docs/spike-results.md#crash-recovery).
 
-`POST /sessions/{id}/fork {at_seq}` creates a new session whose log is the source's up to `at_seq` plus `forked_from`, copied in one transaction, and gives it its own VM. At the source's head, with a running source VM made for the same harness, the fork's VM is a copy-on-write `fork()` of the source's (memory and disk). Otherwise it is rebuilt from the repo plus the workspace patch saved at or before `at_seq`; this is always the case for `deepagents_ollama` and `claude_agent`, because microsandbox refuses to fork a VM with a network policy of its own (`Network.none()`) or with secrets. A fork in the middle of a run is refused with 409. `DELETE /sessions/{id}` destroys the VM and closes the session; closed sessions are not reconciled.
+`POST /sessions/{id}/fork {at_seq}` creates a new session whose log is the source's up to `at_seq` plus `forked_from`, copied in one transaction, and gives it its own VM. At the source's head, with a running source VM made for the same harness, the fork's VM is a copy-on-write `fork()` of the source's (memory and disk). Otherwise it is rebuilt from the repo plus the workspace patch saved at or before `at_seq`; this is always the case for `deepagents_ollama`, `claude_agent` and `claude_agent_local`, because microsandbox refuses to fork a VM with a network policy of its own (`Network.none()`) or with secrets. A fork in the middle of a run is refused with 409. `DELETE /sessions/{id}` destroys the VM and closes the session; closed sessions are not reconciled.
 
 ## Requirements
 
 - Apple Silicon Mac, [uv](https://docs.astral.sh/uv/)
 - Python 3.13 (`uv python install 3.13`)
 - Docker (for example OrbStack) to run PostgreSQL 18 from `compose.yaml`
-- [Ollama](https://ollama.com) on its default `127.0.0.1:11434` with the model in `LAB_OLLAMA_MODEL` pulled (default `gemma4:26b-a4b-it-mtp-q4_K_M`, about 18 GB) for the `deepagents_ollama` harness
-- For the `claude_agent` harness, its tests and the network spike: `DEEPSEEK_API_KEY` in the environment, and `make claude-sdk` once
+- [Ollama](https://ollama.com) on its default `127.0.0.1:11434` with the model in `LAB_OLLAMA_MODEL` pulled (default `gemma4:26b-a4b-it-mtp-q4_K_M`, about 18 GB) for the `deepagents_ollama` and `claude_agent_local` harnesses. `claude_agent_local` uses Ollama's Anthropic-compatible `/v1/messages`, which needs a recent Ollama (tested with 0.40.16)
+- For the `claude_agent` and `claude_agent_local` harnesses: `make claude-sdk` once. For `claude_agent`, its tests and the network spike also `DEEPSEEK_API_KEY` in the environment
 - If the Mac runs an outbound firewall (for example LuLu), allow `.venv/lib/python3.13/site-packages/microsandbox/_bundled/bin/msb`. All guest traffic leaves through that binary.
 
 Docker is only used for Postgres. `uv sync` installs the microsandbox Python SDK, and its wheel bundles the runtime (`msb` plus libkrun), which runs each VM on macOS Hypervisor.framework. No daemon is involved: the API process owns the VMs.
@@ -121,7 +128,7 @@ make migrate           # apply migrations/*.sql
 make api               # run the session API on http://127.0.0.1:8000
 make lint              # ruff (lint and format check) and mypy
 make test              # unit tests (need Postgres, use their own lab_test database)
-make test-integration  # end-to-end tests with real microVMs (need network; the slow agent test needs Ollama, the claude_agent tests DEEPSEEK_API_KEY and spend a few DeepSeek tokens; skipped without them)
+make test-integration  # end-to-end tests with real microVMs (need network; the slow agent tests and the claude_agent_local tests need Ollama, the claude_agent tests DEEPSEEK_API_KEY and spend a few DeepSeek tokens; skipped without them)
 make test-chaos        # kill -9 the API mid-run and restart it, per placement; prints recovery times (the host case needs Ollama)
 make claude-sdk        # install the Claude Agent SDK for the VMs into .cache/ (once; test-integration runs it)
 make spike             # run the three spikes in order
@@ -136,7 +143,7 @@ uv run lab tail <session_id>                                    # stream events 
 uv run lab say <session_id> "One test fails. Fix the code."     # in a third terminal
 ```
 
-The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `POST /sessions/{id}/harness {name}` (202), `POST /sessions/{id}/fork {at_seq}` (201), `DELETE /sessions/{id}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. A message, a switch or a close for a closed or failed session gets 409. Harnesses: `deepagents_ollama`, `claude_agent` and `scripted` (the default). `repo_url` is an `https://` git URL or a directory under `fixtures/`; other schemes are refused, because the clone runs on the host. Neither the `deepagents_ollama` VM (no network) nor the `claude_agent` VM (DeepSeek only) can install anything: the stock `python:3.13` image has no pytest, and a real repo's test dependencies are missing. The `calc-repo` fixture uses `unittest` for that reason.
+The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `POST /sessions/{id}/harness {name}` (202), `POST /sessions/{id}/fork {at_seq}` (201), `DELETE /sessions/{id}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. A message, a switch or a close for a closed or failed session gets 409. Harnesses: `deepagents_ollama`, `claude_agent`, `claude_agent_local` and `scripted` (the default). `repo_url` is an `https://` git URL or a directory under `fixtures/`; other schemes are refused, because the clone runs on the host. None of the `deepagents_ollama` VM (no network), the `claude_agent` VM (DeepSeek only) and the `claude_agent_local` VM (no network, Ollama's Messages API over vsock) can install anything: the stock `python:3.13` image has no pytest, and a real repo's test dependencies are missing. The `calc-repo` fixture uses `unittest` for that reason.
 
 ## Configuration
 
@@ -149,9 +156,9 @@ Read from the environment when the API starts (`src/lab/config.py`).
 | `LAB_VM_MEMORY_MIB` | `512` | Memory limit per session VM |
 | `LAB_RUN_TIMEOUT_S` | `900` | Wall time of one run, including VM creation; then `run_failed{reason: "timeout"}` |
 | `LAB_EXEC_TIMEOUT_S` | `120` | One command in the VM; the agent sees exit code 124 and a timeout message |
-| `LAB_MAX_TOOL_CALLS` | `50` | Tool calls per run (`deepagents_ollama`); then `run_failed{reason: "max_tool_calls"}`. For `claude_agent` it is the SDK's `max_turns`; then `run_failed{reason: "max_turns"}` |
-| `LAB_OLLAMA_MODEL` | `gemma4:26b-a4b-it-mtp-q4_K_M` | Ollama model of `deepagents_ollama` (`qwen3-coder:30b` is the coding-tuned alternative) |
-| `LAB_OLLAMA_NUM_CTX` | `65536` | Context window requested from Ollama (it advises 32k or more for tool calling) |
+| `LAB_MAX_TOOL_CALLS` | `50` | Tool calls per run (`deepagents_ollama`); then `run_failed{reason: "max_tool_calls"}`. For `claude_agent` and `claude_agent_local` it is the SDK's `max_turns`; then `run_failed{reason: "max_turns"}` |
+| `LAB_OLLAMA_MODEL` | `gemma4:26b-a4b-it-mtp-q4_K_M` | Ollama model of `deepagents_ollama` and `claude_agent_local` (`qwen3-coder:30b` is the coding-tuned alternative) |
+| `LAB_OLLAMA_NUM_CTX` | `65536` | Context window `deepagents_ollama` requests from Ollama (it advises 32k or more for tool calling). `claude_agent_local` cannot request one through the Messages API: it gets the context Ollama serves the model with |
 | `DEEPSEEK_API_KEY` | none | DeepSeek key for `claude_agent`; it only reaches microsandbox's host proxy, never a VM |
 | `LAB_DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek model of `claude_agent` (`deepseek-v4-pro` is the strong option); must be in `src/lab/pricing.py` |
 | `LAB_MAX_USD_PER_RUN` | `0.50` | Spend limit of one `claude_agent` run, at DeepSeek's peak prices; then `run_failed{reason: "budget"}` |
@@ -166,17 +173,17 @@ Read from the environment when the API starts (`src/lab/config.py`).
 | `compose.yaml` | PostgreSQL 18 for the event log |
 | `migrations/` | SQL migrations, applied in file name order by `make migrate` |
 | `src/lab/` | The lab package: event store (`events.py`), live fan-out (`fanout.py`), sandbox manager (`sandbox.py`), per-session runner task and fork (`session.py`), state machines (`state.py`), startup reconciliation (`recovery.py`), API (`api.py`), CLI (`cli.py`), limits and model settings (`config.py`), DeepSeek prices (`pricing.py`, with the date they were checked) |
-| `src/lab/harnesses/` | Agent harnesses behind one interface (`base.py`), plus the registry: `deepagents_ollama.py` (placement A) and its VM backend `microsandbox_backend.py`, `claude_agent.py` (placement B), and `scripted.py` |
-| `src/lab/runner/runner.py` | Copied into each VM; runs the in-VM agent (`scripted` or the Claude Agent SDK), JSON task in, JSONL events out |
-| `tests/` | Unit tests, including Hypothesis properties of the state machines under crashes (`test_state_properties.py`) and the harness contract (`test_harness_contract.py`, with a fake `claude_agent_sdk` in `tests/fakes/`); `tests/integration/` runs real microVMs (and, marked `slow`, a real model through Ollama; marked `chaos`, kills of the API process; `test_claude_agent.py` uses DeepSeek) |
+| `src/lab/harnesses/` | Agent harnesses behind one interface (`base.py`), plus the registry: `deepagents_ollama.py` (placement A) and its VM backend `microsandbox_backend.py`, `claude_agent.py` (placement B), `claude_agent_local.py` (B-local, with the Ollama bridge), and `scripted.py` |
+| `src/lab/runner/runner.py` | Copied into each VM; runs the in-VM agent (`scripted` or the Claude Agent SDK, plus the loopback-to-vsock relay for B-local), JSON task in, JSONL events out |
+| `tests/` | Unit tests, including Hypothesis properties of the state machines under crashes (`test_state_properties.py`) and the harness contract (`test_harness_contract.py`, with a fake `claude_agent_sdk` in `tests/fakes/`); `tests/integration/` runs real microVMs (and, marked `slow`, a real model through Ollama; marked `chaos`, kills of the API process; `test_claude_agent.py` uses DeepSeek, `test_claude_agent_local.py` the host's Ollama) |
 | `fixtures/calc-repo/` | A tiny Python package with one failing test, used as a repo by the agent tests. Copied into VMs as a single-commit git repo |
 | `spikes/` | Throwaway experiments that answer one question each before the real code is written |
 | `spikes/out/` | Raw spike output (JSON and cached downloads). Gitignored |
 | `docs/spike-results.md` | Curated spike numbers and the decisions they drove, plus the measured crash recovery times |
 | `scripts/check_names.sh` | Name check used by `make check-names` |
-| `.cache/` | The Claude Agent SDK for Linux arm64, installed by `make claude-sdk` and mounted into `claude_agent` VMs. Gitignored |
+| `.cache/` | The Claude Agent SDK for Linux arm64, installed by `make claude-sdk` and mounted into `claude_agent` and `claude_agent_local` VMs. Gitignored |
 | `.names-denylist` | Local regex list for the name check. Gitignored, never committed |
-| `~/.microsandbox/` | Outside the repo: microsandbox's image cache, sandbox database and CA. Created by the SDK |
+| `~/.microsandbox/` | Outside the repo: microsandbox's image cache, sandbox database and CA. Created by the SDK. While the API runs it also holds `lab-ollama.sock`, the Ollama bridge's socket |
 
 ## Spikes
 

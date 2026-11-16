@@ -65,6 +65,7 @@ class VmSpec:
     env: Mapping[str, str] = field(default_factory=dict)
     secrets: Sequence[SecretEntry] = ()
     volumes: Mapping[str, MountConfig] = field(default_factory=dict)
+    vsock: Mapping[str, int] = field(default_factory=dict)  # host Unix socket -> guest port
 
     @property
     def forkable(self) -> bool:
@@ -183,7 +184,7 @@ async def provision(
     `save_workspace`) the repo is put back into that state, which is how a lost VM
     or a fork that cannot use `fork()` is rebuilt.
 
-    Network, memory, env, secrets and mounts come from the harness's `spec`.
+    Network, memory, env, secrets, mounts and vsock ports come from the harness's `spec`.
     """
     _ensure_home()
     archive, commit = await _repo_archive(repo_url, commit)
@@ -196,6 +197,7 @@ async def provision(
         env=dict(spec.env),
         secrets=list(spec.secrets),
         volumes=dict(spec.volumes),
+        vsock=dict(spec.vsock),
         detached=True,
         replace=True,
     )
