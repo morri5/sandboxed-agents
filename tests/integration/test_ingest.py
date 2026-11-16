@@ -20,7 +20,7 @@ async def test_ingesting_the_same_file_twice_appends_nothing(
 ) -> None:
     session_id = uuid.uuid4()
     run_id = uuid.uuid4().hex
-    vm, _ = await sandbox.provision(sandbox.sandbox_name(session_id), calc_repo, "sandbox")
+    vm, _ = await sandbox.provision(sandbox.sandbox_name(session_id), calc_repo, sandbox.VmSpec())
     try:
         task = {"run_id": run_id, "harness": "scripted", "transcript": []}
         produced = [ev async for ev in sandbox.exec_runner(vm, task) if ev.rseq is not None]

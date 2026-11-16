@@ -1,19 +1,22 @@
 """The per-session runner task: the only writer of a session's events once it exists.
 
-The API hands user messages (and a close) to the session's runner through a
-queue. The runner first reconciles the session with what survived a crash (see
+The API hands user messages (and harness switches and a close) to the session's
+runner through a queue. The runner first reconciles the session with what survived a crash (see
 `recovery.py`), then works through the queue: it appends the `user_message`
 (idempotent on the client's `idem_key`), makes sure the session has a VM, runs
 the harness and appends what it produces. Live `agent_delta` tokens go to the
 fan-out only. After every run it saves the VM's workspace as a patch, so a lost
-VM or a fork can be rebuilt.
+VM, a fork or a VM for another harness can be rebuilt.
+
+Which harness runs is looked up in the registry by name; what it needs is read
+from its `placement`, `capabilities` and `vm_spec()`, never from its type.
 """
 
 import asyncio
 import base64
 import logging
 import time
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -23,6 +26,7 @@ from lab import config, events, recovery, sandbox
 from lab.events import TERMINAL_RUN_EVENTS
 from lab.fanout import FanOut
 from lab.harnesses import HARNESSES
+from lab.harnesses.base import Harness
 from lab.state import OPEN, SessionState, fold
 
 log = logging.getLogger(__name__)
@@ -33,11 +37,15 @@ class SessionRunner:
         self.pool = pool
         self.fanout = fanout
         self.session_id = session_id
-        self.queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()  # None closes
+        # ("message", text, idem_key), ("harness", name), or None to close
+        self.queue: asyncio.Queue[tuple[str, ...] | None] = asyncio.Queue()
         self.task = asyncio.create_task(self._loop(), name=f"session-{session_id}")
 
     def submit(self, text: str, idem_key: str) -> None:
-        self.queue.put_nowait((text, idem_key))
+        self.queue.put_nowait(("message", text, idem_key))
+
+    def switch_harness(self, name: str) -> None:
+        self.queue.put_nowait(("harness", name))
 
     def close(self) -> None:
         self.queue.put_nowait(None)
@@ -57,10 +65,14 @@ class SessionRunner:
         while True:
             item = await self.queue.get()
             try:
-                if item is None:
-                    await self._close()
-                    return
-                await self._handle(*item)
+                match item:
+                    case None:
+                        await self._close()
+                        return
+                    case ("message", text, idem_key):
+                        await self._handle(text, idem_key)
+                    case ("harness", name):
+                        await self._switch(name)
             except Exception:
                 log.exception("session %s: %s failed", self.session_id, item)
 
@@ -96,6 +108,13 @@ class SessionRunner:
             return  # a retry of a message that is already in the log
         await self._run()
 
+    async def _switch(self, name: str) -> None:
+        """The next run uses harness `name`, on the transcript folded from the log."""
+        state = await self._state()
+        if state.session not in OPEN or state.harness == name:
+            return
+        await self._append("harness_switched", {"from": state.harness, "to": name})
+
     async def _run(self) -> None:
         """Run the harness on the transcript, which ends with the last user message."""
         state = await self._state()
@@ -109,8 +128,11 @@ class SessionRunner:
         deadline = asyncio.timeout(config.RUN_TIMEOUT_S)
         try:
             async with deadline:
-                sb = await self._sandbox(state, harness.placement)
-                async for ev in harness.run(state.transcript, sb, run_id):
+                sb, same_vm = await self._sandbox(state, harness)
+                # The harness may continue its own session only in the VM that holds it.
+                native = "native_resume" in harness.capabilities and same_vm
+                resume = state.resume if native else None
+                async for ev in harness.run(state.transcript, sb, run_id, resume):
                     if ev.rseq is None:
                         self.fanout.publish_delta(self.session_id, {"type": ev.type, **ev.payload})
                         continue
@@ -135,13 +157,22 @@ class SessionRunner:
         if sb is not None:  # also after a failed run: its edits are in the VM all the same
             await self._save_workspace(sb, state)
 
-    async def _sandbox(self, state: SessionState, placement: Literal["host", "sandbox"]) -> Sandbox:
-        """The session's VM: reattached if it still runs, otherwise (re)created."""
-        if state.sandbox == "attached":
+    async def _sandbox(self, state: SessionState, harness: Harness) -> tuple[Sandbox, bool]:
+        """The session's VM, and whether it is the one the last run used.
+
+        It is reattached if it still runs and was made for this harness; a VM made
+        for another harness (network, secrets, mounts) is destroyed. Otherwise the
+        VM is created from the repo plus the last saved workspace.
+        """
+        if state.sandbox == "attached" and state.sandbox_harness != harness.name:
+            await sandbox.destroy(self.session_id)
+            gone = {"name": state.sandbox_name, "reason": "harness_switched"}
+            await self._append("sandbox_destroyed", gone)
+        elif state.sandbox == "attached":
             assert state.sandbox_name is not None
             sb = await sandbox.attach(state.sandbox_name)
             if sb is not None:
-                return sb
+                return sb, True
             lost = {"name": state.sandbox_name, "reason": "not_running"}
             await self._append("sandbox_lost", lost)
         elif state.sandbox == "provisioning":  # a run timed out while the VM was being set up
@@ -153,15 +184,17 @@ class SessionRunner:
         workspace = base64.b64decode(state.workspace) if state.workspace else None
         try:
             sb, commit = await sandbox.provision(
-                name, state.repo_url, placement, state.commit, workspace
+                name, state.repo_url, harness.vm_spec(), state.commit, workspace
             )
         except Exception as exc:
             await self._append(
                 "sandbox_lost", {"name": name, "reason": "provisioning_failed", "error": repr(exc)}
             )
             raise
-        await self._append("sandbox_attached", {"name": name, "commit": commit})
-        return sb
+        await self._append(
+            "sandbox_attached", {"name": name, "commit": commit, "harness": harness.name}
+        )
+        return sb, False
 
     async def _save_workspace(self, sb: Sandbox, state: SessionState) -> None:
         patch = base64.b64encode(await sandbox.save_workspace(sb)).decode()
@@ -186,8 +219,8 @@ async def fork_session(pool: asyncpg.Pool, source_id: UUID, at_seq: int) -> UUID
 
     The VM is a copy-on-write `fork()` of the source's VM when the fork is at the
     source's head and that VM is running; otherwise it is rebuilt from the repo
-    plus the workspace patch saved at or before `at_seq`. Host-placement VMs are
-    always rebuilt: microsandbox does not fork a VM with the `Network.none()` policy.
+    plus the workspace patch saved at or before `at_seq`. A VM whose spec is not
+    `forkable` (a network policy of its own, or secrets) is always rebuilt.
     Raises LookupError for an unknown session and ValueError for a seq that is
     out of range or in the middle of a run.
     """
@@ -200,25 +233,24 @@ async def fork_session(pool: asyncpg.Pool, source_id: UUID, at_seq: int) -> UUID
     if prefix.session not in OPEN:
         raise ValueError(f"cannot fork at seq {at_seq}: the session is {prefix.session} there")
     head = fold(log)
+    assert prefix.harness is not None and prefix.repo_url is not None
+    harness = HARNESSES[prefix.harness]
+    spec = harness.vm_spec()  # may refuse (a missing key): before anything is written
     fork_id: UUID = await pool.fetchval("SELECT uuidv7()")
     await events.fork(pool, source_id, fork_id, at_seq)
     name = sandbox.sandbox_name(fork_id)
     await events.append(pool, fork_id, "sandbox_provisioning", {"name": name})
-    assert prefix.harness is not None and prefix.repo_url is not None
-    placement = HARNESSES[prefix.harness].placement
     source_vm = None
-    if at_seq == head.last_seq and head.sandbox == "attached" and placement == "sandbox":
+    at_head = at_seq == head.last_seq and head.sandbox == "attached"
+    if at_head and head.sandbox_harness == harness.name and spec.forkable:
         assert head.sandbox_name is not None
         source_vm = await sandbox.attach(head.sandbox_name)
     if source_vm is not None:
         sb, commit, via = await sandbox.fork(source_vm, name), prefix.commit, "fork"
     else:
         workspace = base64.b64decode(prefix.workspace) if prefix.workspace else None
-        sb, commit = await sandbox.provision(
-            name, prefix.repo_url, placement, prefix.commit, workspace
-        )
+        sb, commit = await sandbox.provision(name, prefix.repo_url, spec, prefix.commit, workspace)
         via = "rebuild"
-    await events.append(
-        pool, fork_id, "sandbox_attached", {"name": name, "commit": commit, "via": via}
-    )
+    payload = {"name": name, "commit": commit, "harness": harness.name, "via": via}
+    await events.append(pool, fork_id, "sandbox_attached", payload)
     return fork_id

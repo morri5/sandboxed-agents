@@ -11,7 +11,8 @@ is always this fold over the log.
     run:     queued -> running -> finished | failed | interrupted
 
 A first run starts straight from `created` (the VM is provisioned inside the run);
-`ready` is a session whose VM exists but has not run yet, as after a fork.
+`ready` is a session whose VM exists but has not run yet, as after a fork. A
+`harness_switched` is only allowed between runs.
 """
 
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ SESSION: dict[str, dict[str, str]] = {
     "forked_from": dict.fromkeys(OPEN, "created"),
     "sandbox_attached": {"created": "ready", **{s: s for s in ("ready", "running", "idle")}},
     "user_message": {s: s for s in OPEN},  # only an open session between runs takes one
+    "harness_switched": {s: s for s in OPEN},
     "run_started": dict.fromkeys(OPEN, "running"),
     **{end: {"running": "idle"} for end in RUN_ENDS},
     "session_failed": dict.fromkeys(OPEN, "failed"),
@@ -62,8 +64,9 @@ class SessionState:
     run: str = "none"
     session_id: str | None = None
     repo_url: str | None = None
-    harness: str | None = None
+    harness: str | None = None  # the harness the next run uses
     sandbox_name: str | None = None
+    sandbox_harness: str | None = None  # the harness the VM was made for (its VmSpec)
     commit: str | None = None  # the commit an https clone was taken at (None for a fixture)
     workspace: str | None = None  # last saved workspace patch, base64 (see `workspace_saved`)
     message_seq: int | None = None  # the last user message
@@ -71,6 +74,9 @@ class SessionState:
     answered: bool = False  # the last user message got an `agent_message`
     run_id: str | None = None  # the last run started
     run_harness: str | None = None
+    # The harness's own session to continue (`native_resume`): set by a finished run,
+    # dropped by anything that changes the VM or the harness.
+    resume: str | None = None
     last_seq: int = 0
     transcript: list[Message] = field(default_factory=list)
 
@@ -103,15 +109,25 @@ def fold(events: list[Event]) -> SessionState:
             case "agent_message":
                 state.transcript.append(Message("assistant", p["text"]))
                 state.answered = True
+            case "harness_switched":
+                state.harness = p["to"]
+                state.resume = None
             case "sandbox_provisioning":
                 state.sandbox_name = p["name"]
+                state.resume = None
             case "sandbox_attached":
                 state.sandbox_name = p["name"]
+                state.sandbox_harness = p.get("harness", state.harness)  # older logs lack it
                 state.commit = p.get("commit")
+            case "sandbox_lost" | "sandbox_destroyed" | "forked_from":
+                state.resume = None
             case "run_started":
                 state.run_id = p["run_id"]
                 state.run_harness = p["harness"]
                 state.attempts += 1
+                state.resume = None
+            case "run_finished":
+                state.resume = p.get("resume")
             case "workspace_saved":
                 state.workspace = p["patch_b64"]
     return state

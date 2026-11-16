@@ -130,3 +130,17 @@ Two microsandbox behaviours found while building this (0.7.15):
 |---|---|
 | Does a process started with `exec_stream` survive a `kill -9` of the host process that started it? | **No.** It stops at once (a loop writing a file every 0.5 s stopped at the kill). A managed job started with `exec_detached` keeps running, its stdin works, `follow_logs()` replays its output from the start and ends when it exits, and `inspect()` reports its state and exit code. The in-VM runner therefore runs as a job. |
 | Can `fork()` copy a VM created with `Network.none()`? | **No.** It raises `InvalidConfigError` ("source uses host-backed proxy, TLS or secret resources"). A VM with the default network forks in about 0.3 s (one measurement), and the fork kept running after the process that created it exited. Forks of host-placement sessions are therefore rebuilt from the repo plus the saved workspace patch. |
+
+## The Claude Agent SDK harness in a VM
+
+Measured on 2026-11-16 while building `claude_agent` (microsandbox 0.7.15, `claude-agent-sdk` 0.2.182 with CLI 2.1.325, `deepseek-flash`), one run each unless stated.
+
+| Question | Result |
+|---|---|
+| SDK installed on the host for Linux arm64 (`uv pip install --target`) and bind-mounted read-only into the VM | Works: `PYTHONPATH` points at the mount, and the bundled CLI runs from it. The install is about 380 MB |
+| `permission_mode="bypassPermissions"` as root in the VM | **Refused** by the CLI (`--dangerously-skip-permissions cannot be used with root/sudo privileges`). The runner uses `dontAsk` with an allow-list of the built-in tools instead |
+| `fork()` of a VM with secrets | **Refused** (`InvalidConfigError`, same message as for `Network.none()`), so `claude_agent` forks are rebuilt |
+| Per-turn usage in the stream | The `message_delta` stream event at the end of each model turn carries that turn's usage (input, cache read and output tokens); the run's totals are in the final `result` message. The budget check adds up the per-turn usage |
+| First run in a fresh VM, a one-line answer (`run_finished.usage`) | 10 784 input, 183 output tokens, about $0.0035 at peak prices |
+| Next run with the SDK's own session resumed | 235 input, 10 752 cache read, 39 output tokens |
+| Budget below one turn (`LAB_MAX_USD_PER_RUN=0.00005`) | `run_failed{reason: "budget"}` after the first turn (10 723 input, 110 output tokens). That turn had issued two tool calls at once: the first (`ls`) still ran, the second was rejected by the interrupt |

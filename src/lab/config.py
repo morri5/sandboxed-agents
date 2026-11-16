@@ -23,3 +23,8 @@ OLLAMA_NUM_CTX = _int("LAB_OLLAMA_NUM_CTX", 65536)  # Ollama advises 32k+ for to
 
 # Pause before each step of the scripted fake agent, so crash tests can kill the API mid-run.
 SCRIPTED_STEP_DELAY_S = _int("LAB_SCRIPTED_STEP_DELAY_S", 0)
+
+# Brain of the in-VM `claude_agent` harness: DeepSeek's Anthropic-compatible API.
+DEEPSEEK_MODEL = os.environ.get("LAB_DEEPSEEK_MODEL", "deepseek-flash")
+# Spend limit of one `claude_agent` run, from token usage and `pricing.py`: reason "budget".
+MAX_USD_PER_RUN = float(os.environ.get("LAB_MAX_USD_PER_RUN", "0.50"))

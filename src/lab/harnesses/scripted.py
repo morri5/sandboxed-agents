@@ -12,7 +12,7 @@ from microsandbox import Sandbox
 
 from lab import config
 from lab.events import AgentEvent, Message
-from lab.sandbox import exec_runner
+from lab.sandbox import VmSpec, exec_runner
 
 
 class ScriptedHarness:
@@ -20,8 +20,11 @@ class ScriptedHarness:
     placement: Literal["host", "sandbox"] = "sandbox"
     capabilities = frozenset({"streaming", "tool_use"})
 
+    def vm_spec(self) -> VmSpec:
+        return VmSpec()  # the default public network: the runner `pip install`s pytest
+
     async def run(
-        self, transcript: list[Message], sandbox: Sandbox, run_id: str
+        self, transcript: list[Message], sandbox: Sandbox, run_id: str, resume: str | None = None
     ) -> AsyncIterator[AgentEvent]:
         task = {
             "run_id": run_id,

@@ -19,6 +19,7 @@ from microsandbox import Sandbox
 
 from lab import config
 from lab.events import TERMINAL_RUN_EVENTS
+from lab.harnesses import HARNESSES
 from lab.sandbox import destroy, provision, sandbox_name
 
 CALC_REPO = str(Path(__file__).resolve().parents[2] / "fixtures" / "calc-repo")
@@ -86,7 +87,9 @@ def api(clean_db: str) -> Iterator[str]:
 async def host_vm() -> AsyncIterator[Sandbox]:
     """A VM as the host-placement harness gets it: calc-repo copied in, no network."""
     session_id = uuid.uuid4()
-    sb, _ = await provision(sandbox_name(session_id), CALC_REPO, "host")
+    sb, _ = await provision(
+        sandbox_name(session_id), CALC_REPO, HARNESSES["deepagents_ollama"].vm_spec()
+    )
     yield sb
     await destroy(session_id)
 
@@ -145,3 +148,33 @@ def until_run_end(log: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
 @pytest.fixture
 def calc_repo() -> str:
     return CALC_REPO
+
+
+def events(api: str, session_id: str) -> list[dict[str, Any]]:
+    log: list[dict[str, Any]] = httpx.get(f"{api}/sessions/{session_id}/events").json()
+    return log
+
+
+def _run_ended(log: list[dict[str, Any]], text: str) -> bool:
+    """The run for the message `text` has ended."""
+    sent = [
+        i for i, e in enumerate(log) if e["type"] == "user_message" and e["payload"]["text"] == text
+    ]
+    return bool(sent) and any(e["type"] in TERMINAL_RUN_EVENTS for e in log[sent[-1] :])
+
+
+async def say_and_wait(
+    api: str, session_id: str, text: str, timeout: float = 600
+) -> list[dict[str, Any]]:
+    """Send a message; return the log once its run ended and the log is quiet (the
+    workspace snapshot after a run may add one more event)."""
+    body = {"text": text, "idem_key": str(uuid.uuid4())}
+    assert httpx.post(f"{api}/sessions/{session_id}/messages", json=body).status_code == 202
+    previous = None
+    async with asyncio.timeout(timeout):
+        while True:
+            await asyncio.sleep(1)
+            log = events(api, session_id)
+            if _run_ended(log, text) and log == previous:
+                return log
+            previous = log

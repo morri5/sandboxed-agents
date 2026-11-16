@@ -1,4 +1,4 @@
-.PHONY: lint test test-integration test-chaos spike check-names db-up migrate api
+.PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk
 
 PY_SOURCES := spikes src tests
 
@@ -13,7 +13,7 @@ test: db-up
 	uv run pytest -m "not integration"
 
 # Real microVMs (needs network for the image pull and the git clone).
-test-integration: db-up
+test-integration: db-up claude-sdk
 	uv run pytest -m "integration and not chaos"
 
 # Kills the API with SIGKILL mid-run and restarts it; prints the recovery times.
@@ -38,3 +38,7 @@ migrate: db-up
 
 api: migrate
 	uv run uvicorn lab.api:app
+
+# The Claude Agent SDK (and its CLI) for Linux arm64, mounted into claude_agent VMs.
+claude-sdk:
+	uv run python -c 'from lab.harnesses.claude_agent import install_sdk; install_sdk()'

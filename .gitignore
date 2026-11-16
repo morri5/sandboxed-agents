@@ -15,3 +15,6 @@ spikes/out/
 
 # Local-only notes (HumanLayer thoughts)
 thoughts/
+
+# The Claude Agent SDK for the VMs, installed by `make claude-sdk`
+.cache/

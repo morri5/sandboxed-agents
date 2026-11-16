@@ -24,13 +24,13 @@ from deepagents.profiles import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_ollama import ChatOllama
-from microsandbox import Sandbox
+from microsandbox import Network, Sandbox
 
 from lab import config
 from lab.events import AgentEvent, Message
 from lab.harnesses.microsandbox_backend import MicrosandboxBackend
 from lab.runner.runner import OUTPUT_LIMIT
-from lab.sandbox import REPO_DIR
+from lab.sandbox import REPO_DIR, VmSpec
 
 # No general-purpose subagent (the `task` tool) for Ollama models: its tool calls
 # would run inside one opaque `task` result, invisible to the event log and to the
@@ -65,8 +65,11 @@ class DeepAgentsOllamaHarness:
             model=config.OLLAMA_MODEL, base_url=config.OLLAMA_URL, num_ctx=config.OLLAMA_NUM_CTX
         )
 
+    def vm_spec(self) -> VmSpec:
+        return VmSpec(network=Network.none())  # tools only: the VM never talks to anything
+
     async def run(
-        self, transcript: list[Message], sandbox: Sandbox, run_id: str
+        self, transcript: list[Message], sandbox: Sandbox, run_id: str, resume: str | None = None
     ) -> AsyncIterator[AgentEvent]:
         backend = MicrosandboxBackend(sandbox, await sandbox.name)
         agent = create_deep_agent(model=self._model(), backend=backend, system_prompt=SYSTEM_PROMPT)

@@ -5,10 +5,14 @@ Every durable event gets the run id and a per-run counter `rseq`, is appended to
 The file is what survives if the API that reads stdout dies. Live `agent_delta`
 tokens go to stdout only.
 
-Standard library only: the VM image has Python but none of the lab's packages.
+Two agents: `scripted`, a deterministic fake, and `claude_agent`, the Claude Agent
+SDK with DeepSeek as the brain. Standard library only, apart from the SDK, which
+only `claude_agent` VMs have (mounted read-only, see `harnesses/claude_agent.py`).
 """
 
+import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -16,6 +20,7 @@ from pathlib import Path
 from typing import IO, Any
 
 OUTPUT_LIMIT = 16_000  # characters kept per tool output (the tail, where summaries are)
+TERMINAL = ("run_finished", "run_failed", "run_interrupted")
 
 
 class Emitter:
@@ -23,9 +28,11 @@ class Emitter:
         self.run_id = run_id
         self.log = log
         self.rseq = 0
+        self.ended = False  # a terminal event was emitted
 
     def event(self, type: str, payload: dict[str, Any]) -> None:
         self.rseq += 1
+        self.ended = self.ended or type in TERMINAL
         line = json.dumps(
             {"run_id": self.run_id, "rseq": self.rseq, "type": type, "payload": payload}
         )
@@ -98,7 +105,143 @@ def scripted(emit: Emitter, task: dict[str, Any]) -> None:
     emit.event("agent_message", {"text": answer})
 
 
-HARNESSES = {"scripted": scripted}
+def usd(usage: dict[str, Any], price: dict[str, float]) -> float:
+    """Cost of an Anthropic-style `usage` at `price` (USD per million tokens).
+
+    Tokens written to the cache are billed as input (DeepSeek caches on its own).
+    """
+    tokens = (
+        (usage.get("input_tokens") or 0) * price["input"]
+        + (usage.get("cache_creation_input_tokens") or 0) * price["input"]
+        + (usage.get("cache_read_input_tokens") or 0) * price["cache_read"]
+        + (usage.get("output_tokens") or 0) * price["output"]
+    )
+    return tokens / 1_000_000
+
+
+USAGE_KEYS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+)
+CLAUDE_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# Subagents would hide their tool calls inside one result; the web tools cannot
+# work behind a network policy that only allows the model API.
+CLAUDE_DISALLOWED = ["Task", "Agent", "WebFetch", "WebSearch"]
+
+
+def claude_prompt(transcript: list[dict[str, str]], resume: str | None) -> str:
+    """The last user message, preceded by the earlier conversation unless the
+    harness resumes its own session (which already holds it)."""
+    last = transcript[-1]["text"]
+    if resume or len(transcript) == 1:
+        return last
+    earlier = "\n\n".join(f"{m['role']}: {m['text']}" for m in transcript[:-1])
+    return (
+        "The conversation so far, rebuilt from the session log:\n\n"
+        f"<conversation>\n{earlier}\n</conversation>\n\nThe user's new message:\n\n{last}"
+    )
+
+
+def claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] | None:
+    return asyncio.run(_claude_agent(emit, task))
+
+
+async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] | None:
+    """The Claude Agent SDK on the task, as events; returns the `run_finished` payload.
+
+    Cost is added up after every model turn from the usage in the turn's
+    `message_delta` stream event; over the budget the client is interrupted and the
+    run ends with `run_failed{reason: "budget"}`. `max_turns` is the hard cap in
+    case usage is missing.
+    """
+    from claude_agent_sdk import (  # only claude_agent VMs have the SDK
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        ResultMessage,
+        StreamEvent,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    model, price, budget = task["model"], task["price"], task["budget_usd"]
+    options = ClaudeAgentOptions(
+        cwd=os.getcwd(),
+        model=model,
+        system_prompt={"type": "preset", "preset": "claude_code", "append": task["system_prompt"]},
+        allowed_tools=CLAUDE_TOOLS,
+        disallowed_tools=CLAUDE_DISALLOWED,
+        permission_mode="dontAsk",  # the VM is the boundary; anything not allowed is denied
+        max_turns=task["max_turns"],
+        resume=task.get("resume"),
+        include_partial_messages=True,
+        env={"ANTHROPIC_DEFAULT_HAIKU_MODEL": model},  # background calls never ask for Claude
+    )
+    spent, over_budget, result = 0.0, False, None
+    names: dict[str, str] = {}
+    async with ClaudeSDKClient(options) as client:
+        await client.query(claude_prompt(task["transcript"], task.get("resume")))
+        async for msg in client.receive_response():
+            if isinstance(msg, StreamEvent):
+                event = msg.event
+                delta = event.get("delta") or {}
+                if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                    emit.delta(delta["text"])
+                elif event.get("type") == "message_delta" and not over_budget:
+                    spent += usd(event.get("usage") or {}, price)
+                    if spent > budget:
+                        over_budget = True
+                        await client.interrupt()
+            elif isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, ToolUseBlock):
+                        names[block.id] = block.name
+                        payload = {"id": block.id, "name": block.name, "args": block.input}
+                        emit.event("tool_call", payload)
+            elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock):
+                        content = block.content
+                        if not isinstance(content, str):  # a list of content blocks
+                            content = "".join(c.get("text", "") for c in content or [])
+                        emit.event(
+                            "tool_result",
+                            {
+                                "id": block.tool_use_id,
+                                "name": names.get(block.tool_use_id),
+                                "content": tail(content),
+                                "is_error": bool(block.is_error),
+                            },
+                        )
+            elif isinstance(msg, ResultMessage):
+                result = msg
+    if result is None:
+        raise RuntimeError("the SDK ended without a result message")
+    usage = {k: (result.usage or {}).get(k) or 0 for k in USAGE_KEYS}
+    cost = {"usage": usage, "cost_usd": round(max(spent, usd(usage, price)), 6)}
+    if over_budget:
+        emit.event("run_failed", {"reason": "budget", "limit_usd": budget, **cost})
+    elif result.subtype == "error_max_turns":
+        emit.event("run_failed", {"reason": "max_turns", "limit": task["max_turns"], **cost})
+    elif result.is_error or result.subtype != "success":
+        error = result.errors or result.result or result.subtype
+        emit.event("run_failed", {"reason": "error", "error": str(error)[-2000:], **cost})
+    else:
+        emit.event("agent_message", {"text": result.result or ""})
+        return {
+            "model": model,
+            "num_turns": result.num_turns,
+            "resumed": bool(task.get("resume")),
+            "resume": result.session_id,  # the SDK session, for a native resume next run
+            **cost,
+        }
+    return None
+
+
+HARNESSES = {"scripted": scripted, "claude_agent": claude_agent}
 
 
 def main() -> None:
@@ -109,11 +252,12 @@ def main() -> None:
     with (runs / f"{task['run_id']}.jsonl").open("a") as log:
         emit = Emitter(task["run_id"], log)
         try:
-            HARNESSES[task["harness"]](emit, task)
+            finished = HARNESSES[task["harness"]](emit, task)
         except Exception as exc:  # report any agent failure as an event, then exit non-zero
             emit.event("run_failed", {"reason": "runner_error", "error": repr(exc)})
             sys.exit(1)
-        emit.event("run_finished", {})
+        if not emit.ended:
+            emit.event("run_finished", finished or {})
 
 
 if __name__ == "__main__":

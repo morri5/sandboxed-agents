@@ -5,48 +5,16 @@ an earlier seq it is rebuilt from the repo plus the workspace patch saved at
 that point. Uses the scripted harness (in-VM, deterministic) through the API.
 """
 
-import asyncio
 import uuid
-from typing import Any
 
 import httpx
 import pytest
 from microsandbox import Sandbox
 
-from lab.events import TERMINAL_RUN_EVENTS
 from lab.sandbox import REPO_DIR, attach, destroy, sandbox_name
+from tests.integration.conftest import events, say_and_wait
 
 pytestmark = pytest.mark.integration
-
-RUN_TIMEOUT = 600
-
-
-def _events(api: str, session_id: str) -> list[dict[str, Any]]:
-    log: list[dict[str, Any]] = httpx.get(f"{api}/sessions/{session_id}/events").json()
-    return log
-
-
-def _run_ended(log: list[dict[str, Any]], text: str) -> bool:
-    """The run for the message `text` has ended."""
-    sent = [
-        i for i, e in enumerate(log) if e["type"] == "user_message" and e["payload"]["text"] == text
-    ]
-    return bool(sent) and any(e["type"] in TERMINAL_RUN_EVENTS for e in log[sent[-1] :])
-
-
-async def _say_and_wait(api: str, session_id: str, text: str) -> list[dict[str, Any]]:
-    """Send a message; return the log once its run ended and the log is quiet (the
-    workspace snapshot after a run may add one more event)."""
-    body = {"text": text, "idem_key": str(uuid.uuid4())}
-    assert httpx.post(f"{api}/sessions/{session_id}/messages", json=body).status_code == 202
-    previous = None
-    async with asyncio.timeout(RUN_TIMEOUT):
-        while True:
-            await asyncio.sleep(1)
-            log = _events(api, session_id)
-            if _run_ended(log, text) and log == previous:
-                return log
-            previous = log
 
 
 async def _vm(session_id: str) -> Sandbox:
@@ -71,11 +39,11 @@ async def test_forks_diverge(api: str, calc_repo: str) -> None:
     source = httpx.post(f"{api}/sessions", json=body).json()["session_id"]
     sessions = [source]
     try:
-        await _say_and_wait(api, source, "first")
+        await say_and_wait(api, source, "first")
         # An edit in the source VM, as an agent would make; the next run's snapshot keeps it.
         await (await _vm(source)).shell(f"echo source > {REPO_DIR}/notes.txt")
-        before_second = len(_events(api, source))
-        log = await _say_and_wait(api, source, "second")
+        before_second = len(events(api, source))
+        log = await say_and_wait(api, source, "second")
         assert log[-1]["type"] == "workspace_saved"
 
         # In the middle of a run is refused.
@@ -87,7 +55,7 @@ async def test_forks_diverge(api: str, calc_repo: str) -> None:
         early = _fork(api, source, before_second)
         sessions += [at_head, early]
 
-        head_log, early_log = _events(api, at_head), _events(api, early)
+        head_log, early_log = events(api, at_head), events(api, early)
         strip = ("session_id",)
         assert [{k: v for k, v in e.items() if k not in strip} for e in head_log[: len(log)]] == [
             {k: v for k, v in e.items() if k not in strip} for e in log
@@ -108,9 +76,9 @@ async def test_forks_diverge(api: str, calc_repo: str) -> None:
         # The fork goes its own way: its VM and log change, the source's do not.
         await head_vm.shell(f"echo fork > {REPO_DIR}/only-in-fork.txt")
         assert not await _exists(source_vm, "only-in-fork.txt")
-        source_len = len(_events(api, source))
-        head_after = await _say_and_wait(api, at_head, "third, only in the fork")
-        assert len(_events(api, source)) == source_len
+        source_len = len(events(api, source))
+        head_after = await say_and_wait(api, at_head, "third, only in the fork")
+        assert len(events(api, source)) == source_len
         assert [e["seq"] for e in head_after] == list(range(1, len(head_after) + 1))
         assert [e["payload"]["text"] for e in head_after if e["type"] == "user_message"] == [
             "first",

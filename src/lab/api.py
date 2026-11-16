@@ -34,6 +34,15 @@ class Fork(BaseModel):
     at_seq: int
 
 
+class SwitchHarness(BaseModel):
+    name: str
+
+
+def _known_harness(name: str) -> None:
+    if name not in HARNESSES:
+        raise HTTPException(422, f"unknown harness {name!r}, known: {sorted(HARNESSES)}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await create_pool(DATABASE_URL)
@@ -73,8 +82,7 @@ async def _runner(request: Request, session_id: UUID) -> SessionRunner:
 
 @app.post("/sessions", status_code=201)
 async def create_session(body: NewSession, request: Request) -> dict[str, Any]:
-    if body.harness not in HARNESSES:
-        raise HTTPException(422, f"unknown harness {body.harness!r}, known: {sorted(HARNESSES)}")
+    _known_harness(body.harness)
     pool = request.app.state.pool
     session_id: UUID = await pool.fetchval("SELECT uuidv7()")
     payload = {"repo_url": body.repo_url, "harness": body.harness}
@@ -108,6 +116,15 @@ async def fork(session_id: UUID, body: Fork, request: Request) -> dict[str, Any]
         raise HTTPException(409, str(exc)) from exc
     await _runner(request, fork_id)  # from here on, the fork's runner is its only writer
     return {"session_id": str(fork_id)}
+
+
+@app.post("/sessions/{session_id}/harness", status_code=202)
+async def switch_harness(session_id: UUID, body: SwitchHarness, request: Request) -> dict[str, Any]:
+    """Queued like a message: the next run uses this harness, on the transcript from the log."""
+    _known_harness(body.name)
+    runner = await _open_runner(request, session_id)
+    runner.switch_harness(body.name)
+    return {"accepted": True}
 
 
 @app.delete("/sessions/{session_id}", status_code=202)

@@ -17,6 +17,7 @@ ATTACHED: Item = ("sandbox_attached", {"name": "lab-x", "commit": "abc"})
 ANSWER: Item = ("agent_message", {"text": "hello"})
 FINISHED: Item = ("run_finished", {})
 INTERRUPTED: Item = ("run_interrupted", {})
+SWITCHED: Item = ("harness_switched", {"from": "scripted", "to": "claude_agent"})
 
 
 def _log(*items: Item) -> list[Event]:
@@ -57,6 +58,7 @@ def test_fold_a_first_run() -> None:
         (CREATED, FINISHED),  # a run that never started
         (CREATED, MESSAGE, STARTED, ("forked_from", {})),  # a fork in the middle of a run
         (CREATED, ("session_closed", {}), MESSAGE),  # a message after the close
+        (CREATED, MESSAGE, STARTED, SWITCHED),  # a harness switch in the middle of a run
     ],
 )
 def test_illegal_transitions_raise(items: tuple[Item, ...]) -> None:
@@ -84,3 +86,21 @@ def test_needs_run() -> None:
     assert not needs_run(fold(_log(CREATED, MESSAGE, STARTED, ANSWER, INTERRUPTED)))  # answered
     assert not needs_run(fold(_log(CREATED, MESSAGE, STARTED, FINISHED)))
     assert not needs_run(fold(_log(CREATED, MESSAGE, STARTED)))  # still running
+
+
+def test_harness_switch_and_native_resume() -> None:
+    finished: Item = ("run_finished", {"resume": "sdk-1"})
+    first_run = (CREATED, MESSAGE, STARTED, PROVISIONING, ATTACHED, ANSWER, finished)
+    state = fold(_log(*first_run))
+    assert (state.harness, state.sandbox_harness, state.resume) == ("scripted", "scripted", "sdk-1")
+    # The next run may resume; a new run, a switch or another VM drops the token.
+    assert fold(_log(*first_run, ("workspace_saved", {"patch_b64": ""}))).resume == "sdk-1"
+    assert fold(_log(*first_run, MESSAGE, STARTED)).resume is None
+    assert fold(_log(*first_run, ("sandbox_lost", {}))).resume is None
+    switched = fold(_log(*first_run, SWITCHED))
+    assert (switched.harness, switched.sandbox_harness, switched.resume) == (
+        "claude_agent",
+        "scripted",  # the VM is still the old harness's until the next run replaces it
+        None,
+    )
+    assert switched.session == "idle"

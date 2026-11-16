@@ -5,7 +5,8 @@ a crash of the VM owner). The VM name is derived from the session id and recorde
 in the log with `sandbox_provisioning` and `sandbox_attached`.
 
 The repo is cloned (or, for a local fixture, archived) on the host and copied in,
-because a VM for a host-placement harness has no network at all.
+because a VM for a host-placement harness has no network at all. What else a VM
+gets (network policy, memory, secrets, mounts) is the harness's `VmSpec`.
 """
 
 import asyncio
@@ -15,12 +16,21 @@ import json
 import os
 import tarfile
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
-from microsandbox import Job, MicrosandboxError, Network, Sandbox, SandboxStatus
+from microsandbox import (
+    Job,
+    MicrosandboxError,
+    MountConfig,
+    Network,
+    Sandbox,
+    SandboxStatus,
+    SecretEntry,
+)
 
 from lab import config
 from lab.events import AgentEvent
@@ -39,6 +49,28 @@ STDERR_LIMIT = 4000
 
 class SandboxError(Exception):
     """Provisioning the VM, or the runner inside it, failed."""
+
+
+@dataclass(frozen=True)
+class VmSpec:
+    """What a harness needs from its VM besides the repo.
+
+    `network=None` is microsandbox's default policy (public internet, no host or
+    private ranges). Secrets stay on the host: the guest sees a placeholder that
+    the host proxy swaps for the real value on requests to the allowed hosts.
+    """
+
+    network: Network | None = None
+    memory_mib: int = field(default_factory=lambda: config.VM_MEMORY_MIB)
+    env: Mapping[str, str] = field(default_factory=dict)
+    secrets: Sequence[SecretEntry] = ()
+    volumes: Mapping[str, MountConfig] = field(default_factory=dict)
+
+    @property
+    def forkable(self) -> bool:
+        """microsandbox's `fork()` refuses a VM with a network policy of its own or
+        secrets ("host-backed proxy, TLS or secret resources", measured)."""
+        return self.network is None and not self.secrets
 
 
 def sandbox_name(session_id: UUID) -> str:
@@ -141,7 +173,7 @@ async def attach(name: str) -> Sandbox | None:
 async def provision(
     name: str,
     repo_url: str,
-    placement: Literal["host", "sandbox"],
+    spec: VmSpec,
     commit: str | None = None,
     workspace: bytes | None = None,
 ) -> tuple[Sandbox, str | None]:
@@ -151,8 +183,7 @@ async def provision(
     `save_workspace`) the repo is put back into that state, which is how a lost VM
     or a fork that cannot use `fork()` is rebuilt.
 
-    A VM for a `host` harness only runs tools, so it gets no network at all. A
-    `sandbox` harness runs its agent inside and keeps the default (public) network.
+    Network, memory, env, secrets and mounts come from the harness's `spec`.
     """
     _ensure_home()
     archive, commit = await _repo_archive(repo_url, commit)
@@ -160,8 +191,11 @@ async def provision(
         name,
         image=IMAGE,
         cpus=config.VM_CPUS,
-        memory=config.VM_MEMORY_MIB,
-        network=Network.none() if placement == "host" else None,
+        memory=spec.memory_mib,
+        network=spec.network,
+        env=dict(spec.env),
+        secrets=list(spec.secrets),
+        volumes=dict(spec.volumes),
         detached=True,
         replace=True,
     )
@@ -186,7 +220,7 @@ async def fork(source: Sandbox, name: str) -> Sandbox:
     """Copy-on-write fork of a running VM (memory and disk), detached like the source.
 
     microsandbox refuses to fork a VM that uses host-backed network resources, which
-    includes the `Network.none()` policy of host-placement VMs.
+    includes the `Network.none()` policy of host-placement VMs (see `VmSpec.forkable`).
     """
     sb = await source.fork(name)
     if await sb.owns_lifecycle:
