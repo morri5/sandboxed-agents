@@ -1,0 +1,50 @@
+[project]
+name = "sandboxed-agents-lab"
+version = "0.1.0"
+description = "A small lab for coding agents in per-chat microVMs with an event-sourced session layer"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "asyncpg>=0.32.0",
+    "fastapi>=0.163.1",
+    "httpx>=0.28.1",
+    "microsandbox==0.7.15",
+    "uvicorn[standard]>=0.54.0",
+    "websockets>=17.4",
+]
+
+[project.scripts]
+lab = "lab.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "lab"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: needs microsandbox and network (run with make test-integration)"]

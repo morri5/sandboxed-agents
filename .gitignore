@@ -1,0 +1,16 @@
+# Local list of names that must never appear in tracked files (see scripts/check_names.sh)
+.names-denylist
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Raw spike output (the curated numbers live in docs/spike-results.md)
+spikes/out/
+
+# Local-only notes (HumanLayer thoughts)
+thoughts/
