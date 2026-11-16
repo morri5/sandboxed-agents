@@ -4,6 +4,50 @@ A small lab for coding agents that run in per-chat microVMs ([microsandbox](http
 
 Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer now runs one chat end to end with a scripted (fake) agent: a session gets its own VM with a clone of the repo, the agent runs inside it, and every durable event lands in the log and streams to clients.
 
+## Architecture
+
+### How it works today
+
+```mermaid
+flowchart LR
+    CLI[CLI: lab new / say / tail] -->|HTTP POST| API
+    CLI <-->|WebSocket stream| API
+    subgraph HOST["Mac (host)"]
+        API[FastAPI] -->|queue| SR[Session runner<br/>only writer per session]
+        SR -->|append event| PG[(PostgreSQL<br/>append-only event log)]
+        PG -->|"pg_notify {session_id, seq}"| FO[Fan-out<br/>one LISTEN connection]
+        FO --> API
+        SR -.->|agent_delta, memory only| FO
+    end
+    subgraph VM["microVM, one per session (detached)"]
+        RUN[runner.py<br/>scripted harness] --> JL["/lab/runs/RUN_ID.jsonl"]
+        RUN --> REPO["/lab/repo<br/>clone of the repo"]
+    end
+    SR -->|exec_stream: task JSON| RUN
+    RUN -->|JSONL events on stdout| SR
+```
+
+Each session gets its own microVM with a clone of the repo. The API hands a user message to the session's runner task, the only process allowed to write that session's events. The runner starts `runner.py` inside the VM, which writes every durable event to a file in the VM first and then prints it. The session runner appends those events to PostgreSQL, and a single `LISTEN` connection wakes the WebSocket subscribers, who read the new rows from the log. The log is the single source of truth: session state is a fold over its events. Token-by-token deltas (`agent_delta`) only go to live clients and are never stored. The VM is detached, so it keeps running if the API restarts, and the next message reattaches to it.
+
+### Where it is going
+
+```mermaid
+flowchart TB
+    API[FastAPI + session runner + event log<br/>built]
+    subgraph A["Placement A: harness on the host (planned)"]
+        DA[deepagents loop<br/>inside the API process] --> OL[Ollama on 127.0.0.1<br/>Gemma 4]
+        DA -->|one sb.exec per tool call| VMA[microVM<br/>Network.none, tools only]
+    end
+    subgraph B["Placement B: harness in the VM (planned)"]
+        VMB[microVM<br/>Claude Code CLI + runner.py] -->|placeholder key| PX[microsandbox secret proxy<br/>holds the real key]
+        PX --> DS[DeepSeek API]
+    end
+    API --> DA
+    API -->|exec_stream| VMB
+```
+
+Two real agent harnesses will sit behind the same interface, each placed where its vendor designed it to run. In A, the deepagents loop runs on the host with a local model, and only its tool calls run in a VM that has no network. In B, the Claude Code CLI runs inside the VM. It uses DeepSeek through its Anthropic-compatible API, and the VM never sees the API key: microsandbox's proxy swaps a placeholder for the real key on requests to the DeepSeek host only. The spikes checked the pieces both rely on: a VM with no network, the per-call `exec` cost, and the secret proxy with the CLI ([docs/spike-results.md](docs/spike-results.md)).
+
 ## Requirements
 
 - Apple Silicon Mac, [uv](https://docs.astral.sh/uv/)
