@@ -1,0 +1,14 @@
+{
+  "invoices": [
+    {
+      "number": "INV-2026-0501",
+      "customer_id": "C-104",
+      "issued_at": "2026-05-04T10:00:00+02:00",
+      "currency": "EUR",
+      "lines": [
+        {"description": "Consulting", "quantity": 3, "unit_price": 120.00, "tax_code": "standard"},
+        {"description": "Printed report", "quantity": 1, "unit_price": "19.99", "tax_code": "reduced"}
+      ]
+    }
+  ]
+}

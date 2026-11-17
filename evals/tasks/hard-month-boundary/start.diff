@@ -1,0 +1,123 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3fc5aa4..1947d8d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,8 @@
+ # Changelog
+ 
++## 0.4.3
++- `ledger summary`: the total per month for a year.
++
+ ## 0.4.2
+ - `reconcile` prefers a payment's reference over the customer and amount.
+ - The text export shows the issue date instead of the full timestamp.
+diff --git a/README.md b/README.md
+index 2e28b0b..f29cddd 100644
+--- a/README.md
++++ b/README.md
+@@ -4,6 +4,7 @@ Invoices, payments and monthly reports for a small business, with the standard l
+ 
+ ```sh
+ python -m ledger report examples/invoices.csv --month 2026-03 --tz Europe/Berlin
++python -m ledger summary examples/invoices.csv --year 2026 --tz Europe/Berlin
+ python -m ledger export examples/invoices.csv --format csv
+ python -m ledger reconcile examples/invoices.csv examples/payments.csv
+ python -m ledger check examples/invoices.json
+diff --git a/ledger/cli.py b/ledger/cli.py
+index 73cfb74..93dad3d 100644
+--- a/ledger/cli.py
++++ b/ledger/cli.py
+@@ -19,6 +19,13 @@ def _report(args: argparse.Namespace) -> int:
+     return 0
+ 
+ 
++def _summary(args: argparse.Namespace) -> int:
++    invoices = load_invoices(args.file)
++    totals = reports.yearly_summary(invoices, args.year, zone(args.tz), args.currency)
++    print(reports.render_summary(args.year, args.currency, totals))
++    return 0
++
++
+ def _export(args: argparse.Namespace) -> int:
+     invoices = load_invoices(args.file)
+     if args.customer:
+@@ -58,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
+     report.add_argument("--currency", default=config.DEFAULT_CURRENCY)
+     report.set_defaults(func=_report)
+ 
++    summary = commands.add_parser("summary", help="totals per month for a year")
++    summary.add_argument("file", type=Path)
++    summary.add_argument("--year", type=int, required=True)
++    summary.add_argument("--tz", default=config.DEFAULT_TIMEZONE, help="IANA time zone")
++    summary.add_argument("--currency", default=config.DEFAULT_CURRENCY)
++    summary.set_defaults(func=_summary)
++
+     export = commands.add_parser("export", help="export invoices")
+     export.add_argument("file", type=Path)
+     export.add_argument(
+diff --git a/ledger/reports.py b/ledger/reports.py
+index 515377b..5f17a4e 100644
+--- a/ledger/reports.py
++++ b/ledger/reports.py
+@@ -2,7 +2,7 @@
+ 
+ from collections.abc import Iterable
+ from dataclasses import dataclass, field
+-from datetime import tzinfo
++from datetime import datetime, timedelta, timezone, tzinfo
+ from decimal import Decimal
+ 
+ from ledger.invoicing import invoice_net, invoice_tax, invoice_total
+@@ -47,6 +47,26 @@ def monthly_report(
+     return report
+ 
+ 
++def yearly_summary(
++    invoices: Iterable[Invoice], year: int, tz: tzinfo, currency: str = "EUR"
++) -> dict[int, Decimal]:
++    """The total invoiced in each calendar month (1 to 12) of `year`, in `tz`."""
++    totals = {month: Decimal("0.00") for month in range(1, 13)}
++    local = timezone(tz.utcoffset(datetime(year, 1, 1)) or timedelta(0))
++    for invoice in invoices:
++        issued = invoice.issued_at.astimezone(local)
++        if issued.year == year and invoice.currency == currency:
++            totals[issued.month] += invoice_total(invoice)
++    return totals
++
++
++def render_summary(year: int, currency: str, totals: dict[int, Decimal]) -> str:
++    lines = [f"Summary {year} ({currency})", ""]
++    lines += [f"{year}-{month:02d}  {format_amount(totals[month], currency):>16}" for month in totals]
++    lines += ["", f"Year:    {format_amount(sum(totals.values(), Decimal('0.00')), currency):>16}"]
++    return "\n".join(lines)
++
++
+ def render(report: MonthlyReport) -> str:
+     lines = [f"Report {report.year}-{report.month:02d} ({report.currency})", ""]
+     for invoice in sorted(report.invoices, key=lambda i: (i.issued_at, i.number)):
+diff --git a/ledger/timeutil.py b/ledger/timeutil.py
+index 60e74eb..2d45f56 100644
+--- a/ledger/timeutil.py
++++ b/ledger/timeutil.py
+@@ -1,6 +1,6 @@
+ """Timestamps and calendar months."""
+ 
+-from datetime import UTC, datetime, tzinfo
++from datetime import UTC, datetime, timedelta, tzinfo
+ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ 
+ 
+@@ -39,9 +39,10 @@ def parse_month(text: str) -> tuple[int, int]:
+ 
+ def month_range(year: int, month: int, tz: tzinfo) -> tuple[datetime, datetime]:
+     """The UTC instants where the calendar month starts and ends in `tz` (end exclusive)."""
+-    start = datetime(year, month, 1, tzinfo=tz)
+-    end = datetime(year + month // 12, month % 12 + 1, 1, tzinfo=tz)
+-    return start.astimezone(UTC), end.astimezone(UTC)
++    start = datetime(year, month, 1)
++    end = datetime(year + month // 12, month % 12 + 1, 1)
++    offset = tz.utcoffset(start) or timedelta(0)
++    return (start - offset).replace(tzinfo=UTC), (end - offset).replace(tzinfo=UTC)
+ 
+ 
+ def to_utc(value: datetime) -> datetime:

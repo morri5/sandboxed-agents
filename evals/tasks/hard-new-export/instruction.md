@@ -1,0 +1,3 @@
+We would like to paste invoice lists into our wiki. Please add a Markdown export: `python -m ledger export <file> --format markdown` should print a Markdown table with one row per invoice and the same columns, in the same order and with the same values, as the CSV export. The amount columns (net, tax, total) should be right-aligned.
+
+It should work like the other export formats: it shows up in the CLI's `--format` choices, and `--output invoices.md` picks it by itself, the way `--output invoices.csv` picks CSV. A value that contains a `|` must not break the table. No new dependencies, please, and don't change the existing public functions.

@@ -1,13 +1,13 @@
 .PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk \
 	grader-deps eval-check eval
 
-PY_SOURCES := spikes src tests
+PY_SOURCES := spikes src tests scripts
 
 lint:
 	uv run ruff check $(PY_SOURCES)
 	uv run ruff format --check $(PY_SOURCES)
 	cd spikes && uv run mypy .
-	uv run mypy src tests
+	uv run mypy src tests scripts
 
 # Unit tests need Postgres (they use their own lab_test database); no VMs.
 test: db-up
@@ -56,7 +56,8 @@ eval-check: grader-deps
 # Writes evals/results/<date>.jsonl and .md. Stop `make api` first.
 EVAL_HARNESS ?= deepagents_ollama,claude_agent
 EVAL_REPEATS ?= 3
+# EVAL_TASKS: comma-separated task names or shell patterns (hard-*); default all.
 EVAL_TASKS ?=
 eval: migrate claude-sdk eval-check
 	uv run python -m lab.evals.run --harness $(EVAL_HARNESS) --repeats $(EVAL_REPEATS) \
-		$(if $(EVAL_TASKS),--tasks $(EVAL_TASKS))
+		$(if $(EVAL_TASKS),--tasks '$(EVAL_TASKS)')

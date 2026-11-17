@@ -1,0 +1,14 @@
+diff --git a/ledger/invoicing.py b/ledger/invoicing.py
+index 9f4eab9..977e34a 100644
+--- a/ledger/invoicing.py
++++ b/ledger/invoicing.py
+@@ -35,8 +35,4 @@ def invoice_tax(invoice: Invoice) -> Decimal:
+ 
+ 
+ def invoice_total(invoice: Invoice) -> Decimal:
+-    gross = sum(
+-        (line.quantity * line.unit_price * (1 + tax.rate(line.tax_code)) for line in invoice.lines),
+-        ZERO,
+-    )
+-    return round_cents(gross)
++    return sum((line_total(line) for line in invoice.lines), ZERO)

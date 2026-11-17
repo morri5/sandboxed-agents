@@ -1,0 +1,207 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3fc5aa4..7e87d5f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,8 @@
+ # Changelog
+ 
++## 0.4.3
++- `export --output FILE` writes to a file and picks the format from its suffix.
++
+ ## 0.4.2
+ - `reconcile` prefers a payment's reference over the customer and amount.
+ - The text export shows the issue date instead of the full timestamp.
+diff --git a/README.md b/README.md
+index 2e28b0b..a9ff2e5 100644
+--- a/README.md
++++ b/README.md
+@@ -5,6 +5,7 @@ Invoices, payments and monthly reports for a small business, with the standard l
+ ```sh
+ python -m ledger report examples/invoices.csv --month 2026-03 --tz Europe/Berlin
+ python -m ledger export examples/invoices.csv --format csv
++python -m ledger export examples/invoices.csv --output march.json
+ python -m ledger reconcile examples/invoices.csv examples/payments.csv
+ python -m ledger check examples/invoices.json
+ ```
+diff --git a/ledger/cli.py b/ledger/cli.py
+index 73cfb74..175975e 100644
+--- a/ledger/cli.py
++++ b/ledger/cli.py
+@@ -23,7 +23,12 @@ def _export(args: argparse.Namespace) -> int:
+     invoices = load_invoices(args.file)
+     if args.customer:
+         invoices = [i for i in invoices if i.customer_id == args.customer]
+-    sys.stdout.write(exporters.get_exporter(args.format)(invoices))
++    name = args.format or (exporters.format_for(args.output) if args.output else "text")
++    text = exporters.get_exporter(name)(invoices)
++    if args.output:
++        args.output.write_text(text, encoding="utf-8")
++    else:
++        sys.stdout.write(text)
+     return 0
+ 
+ 
+@@ -62,10 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
+     export.add_argument("file", type=Path)
+     export.add_argument(
+         "--format",
+-        default="text",
+         choices=exporters.available_formats(),
+-        help="output format: %(choices)s",
++        help="output format: %(choices)s (default: from the --output suffix, else text)",
+     )
++    export.add_argument("--output", type=Path, help="write to this file instead of stdout")
+     export.add_argument("--customer", help="only this customer's invoices")
+     export.set_defaults(func=_export)
+ 
+@@ -84,7 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+     args = build_parser().parse_args(argv)
+     try:
+         code: int = args.func(args)
+-    except (ParseError, TimeError) as exc:
++    except (ParseError, TimeError, exporters.UnknownFormat) as exc:
+         print(f"error: {exc}", file=sys.stderr)
+         return 2
+     return code
+diff --git a/ledger/exporters/__init__.py b/ledger/exporters/__init__.py
+index dfb1fe4..01a04d9 100644
+--- a/ledger/exporters/__init__.py
++++ b/ledger/exporters/__init__.py
+@@ -1,19 +1,23 @@
+ """Export formats.
+ 
+ Each format lives in a module of this package and registers its function with
+-`@register("<name>")`; the function takes a sequence of invoices and returns the
+-exported text. `_MODULES` lists the modules loaded at import, which is what makes
+-a format available (the CLI's `--format` choices come from `available_formats()`).
++`@register("<name>", "<file suffix>")`; the function takes a sequence of invoices
++and returns the exported text. `_MODULES` lists the modules loaded at import,
++which is what makes a format available: the CLI's `--format` choices come from
++`available_formats()`, and `--output <file>` picks the format by its suffix
++(`format_for`).
+ """
+ 
+ import importlib
+ from collections.abc import Callable, Sequence
++from pathlib import Path
+ 
+ from ledger.models import Invoice
+ 
+ Exporter = Callable[[Sequence[Invoice]], str]
+ 
+ _REGISTRY: dict[str, Exporter] = {}
++_SUFFIXES: dict[str, str] = {}  # file suffix -> format name
+ _MODULES = ("csv_export", "json_export", "text_export")
+ 
+ 
+@@ -21,11 +25,12 @@ class UnknownFormat(KeyError):
+     pass
+ 
+ 
+-def register(name: str) -> Callable[[Exporter], Exporter]:
++def register(name: str, suffix: str) -> Callable[[Exporter], Exporter]:
+     def decorator(function: Exporter) -> Exporter:
+-        if name in _REGISTRY:
+-            raise ValueError(f"export format {name!r} registered twice")
++        if name in _REGISTRY or suffix in _SUFFIXES:
++            raise ValueError(f"export format {name!r} or suffix {suffix!r} registered twice")
+         _REGISTRY[name] = function
++        _SUFFIXES[suffix] = name
+         return function
+ 
+     return decorator
+@@ -42,5 +47,13 @@ def available_formats() -> list[str]:
+     return sorted(_REGISTRY)
+ 
+ 
++def format_for(path: Path) -> str:
++    """The format registered for the file's suffix."""
++    try:
++        return _SUFFIXES[path.suffix.lower()]
++    except KeyError:
++        raise UnknownFormat(f"no export format for {path.name}") from None
++
++
+ for _module in _MODULES:
+     importlib.import_module(f"{__name__}.{_module}")
+diff --git a/ledger/exporters/csv_export.py b/ledger/exporters/csv_export.py
+index 55fd35c..1e81152 100644
+--- a/ledger/exporters/csv_export.py
++++ b/ledger/exporters/csv_export.py
+@@ -23,7 +23,7 @@ def row(invoice: Invoice) -> list[str]:
+     ]
+ 
+ 
+-@register("csv")
++@register("csv", ".csv")
+ def export_csv(invoices: Sequence[Invoice]) -> str:
+     out = io.StringIO()
+     writer = csv.writer(out, lineterminator="\n")
+diff --git a/ledger/exporters/json_export.py b/ledger/exporters/json_export.py
+index c56cf56..bfcd890 100644
+--- a/ledger/exporters/json_export.py
++++ b/ledger/exporters/json_export.py
+@@ -9,7 +9,7 @@ from ledger.invoicing import invoice_net, invoice_tax, invoice_total
+ from ledger.models import Invoice
+ 
+ 
+-@register("json")
++@register("json", ".json")
+ def export_json(invoices: Sequence[Invoice]) -> str:
+     items = [
+         serialize.invoice_to_dict(invoice)
+diff --git a/ledger/exporters/text_export.py b/ledger/exporters/text_export.py
+index 480f37d..a264767 100644
+--- a/ledger/exporters/text_export.py
++++ b/ledger/exporters/text_export.py
+@@ -9,7 +9,7 @@ from ledger.models import Invoice
+ HEADER = ("number", "customer_id", "issued", "total")
+ 
+ 
+-@register("text")
++@register("text", ".txt")
+ def export_text(invoices: Sequence[Invoice]) -> str:
+     rows = [HEADER] + [
+         (i.number, i.customer_id, i.issued_at.date().isoformat(), f"{invoice_total(i)} {i.currency}")
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index c1e1ee6..03b859d 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -40,6 +40,12 @@ class CliTest(unittest.TestCase):
+         self.assertEqual(code, 0)
+         self.assertEqual([line.split(",")[0] for line in out.splitlines()[1:]], ["INV-2026-0001", "INV-2026-0003"])
+ 
++    def test_export_to_a_file(self) -> None:
++        target = Path(self.dir.name) / "out.json"
++        code, out = run("export", str(self.file), "--output", str(target))
++        self.assertEqual((code, out), (0, ""))
++        self.assertIn('"INV-2026-0003"', target.read_text())
++
+     def test_check(self) -> None:
+         code, out = run("check", str(self.file))
+         self.assertEqual(code, 0)
+diff --git a/tests/test_exporters.py b/tests/test_exporters.py
+index d244cee..0749e2e 100644
+--- a/tests/test_exporters.py
++++ b/tests/test_exporters.py
+@@ -4,6 +4,7 @@ import json
+ import unittest
+ from datetime import datetime, timedelta, timezone
+ from decimal import Decimal
++from pathlib import Path
+ 
+ from ledger import exporters
+ from ledger.models import Invoice, Line
+@@ -50,6 +51,12 @@ class ExportersTest(unittest.TestCase):
+         self.assertEqual(data["invoices"][1]["customer_id"], "C-2")
+         self.assertEqual(data["invoices"][1]["total"], "1071.00")
+ 
++    def test_format_for_a_file(self) -> None:
++        self.assertEqual(exporters.format_for(Path("out.CSV")), "csv")
++        self.assertEqual(exporters.format_for(Path("x/out.json")), "json")
++        with self.assertRaises(exporters.UnknownFormat):
++            exporters.format_for(Path("out.xlsx"))
++
+     def test_text(self) -> None:
+         lines = exporters.get_exporter("text")(INVOICES).splitlines()
+         self.assertEqual(lines[0].split(), ["number", "customer_id", "issued", "total"])

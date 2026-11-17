@@ -5,11 +5,17 @@
     tests/           hidden tests, plus `config.json` with `fail_to_pass` and `pass_to_pass`
     solution/        `solution.diff`, the reference diff
     adversarial/     `hardcode.diff`, a diff that special-cases the visible examples
+                     (for a hard task: a plausible partial fix)
+
+Tasks named `hard-*` form the hard tier: their `environment/` and the visible test
+copies in `tests/` are generated from `evals/repos/ledger/` plus the task's
+`start.diff` by `scripts/build_hard_tasks.py`.
 
 `tests/`, `solution/` and `adversarial/` never reach an agent's VM: a session can
 only be created on `environment/` (see `sandbox._repo_archive`).
 """
 
+import fnmatch
 import hashlib
 import json
 from dataclasses import dataclass
@@ -72,12 +78,17 @@ def load(directory: Path) -> Task:
     return task
 
 
+def tier(name: str) -> str:
+    """`hard` for the tasks on the shared ledger app (`hard-*`), `easy` for the others."""
+    return "hard" if name.startswith("hard-") else "easy"
+
+
 def load_all(names: list[str] | None = None, root: Path = EVAL_TASKS) -> list[Task]:
-    """Every task, or the named ones, sorted by name."""
+    """Every task, or those matching the given names or shell patterns (`hard-*`), by name."""
     dirs = sorted(d for d in root.iterdir() if d.is_dir())
     if names:
-        missing = set(names) - {d.name for d in dirs}
+        missing = [n for n in names if not any(fnmatch.fnmatchcase(d.name, n) for d in dirs)]
         if missing:
-            raise ValueError(f"unknown tasks: {sorted(missing)}")
-        dirs = [d for d in dirs if d.name in names]
+            raise ValueError(f"no task matches: {missing}")
+        dirs = [d for d in dirs if any(fnmatch.fnmatchcase(d.name, n) for n in names)]
     return [load(d) for d in dirs]

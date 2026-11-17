@@ -1,0 +1,8 @@
+number,customer_id,issued_at,currency,description,quantity,unit_price,tax_code
+INV-2026-0301,C-104,2026-03-02T09:15:00+01:00,EUR,Consulting,2,120.00,standard
+INV-2026-0301,C-104,2026-03-02T09:15:00+01:00,EUR,Travel,1,48.30,zero
+INV-2026-0317,C-221,2026-03-17T14:02:00+01:00,EUR,Workshop,1,900.00,standard
+INV-2026-0329,C-104,2026-03-29T11:40:00+02:00,EUR,Book,3,24.90,reduced
+INV-2026-0331,C-307,2026-03-31T23:10:00+02:00,EUR,Hosting March,1,35.00,standard
+INV-2026-0412,C-221,2026-04-01T00:20:00+02:00,EUR,Hosting April,1,35.00,standard
+INV-2026-0415,C-307,2026-04-15T10:00:00+02:00,EUR,Consulting,4,120.00,standard

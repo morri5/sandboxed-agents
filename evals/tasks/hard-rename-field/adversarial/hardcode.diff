@@ -1,0 +1,23 @@
+diff --git a/ledger/models.py b/ledger/models.py
+index bdf7583..791ca20 100644
+--- a/ledger/models.py
++++ b/ledger/models.py
+@@ -21,6 +21,10 @@ class Invoice:
+     currency: str
+     lines: tuple[Line, ...]
+ 
++    @property
++    def account_id(self) -> str:  # the new name of the field
++        return self.customer_id
++
+ 
+ @dataclass(frozen=True)
+ class Payment:
+@@ -28,3 +32,7 @@ class Payment:
+     customer_id: str
+     amount: Decimal
+     received_at: datetime
++
++    @property
++    def account_id(self) -> str:  # the new name of the field
++        return self.customer_id

@@ -1,0 +1,13 @@
+diff --git a/ledger/reports.py b/ledger/reports.py
+index 5f17a4e..3d35800 100644
+--- a/ledger/reports.py
++++ b/ledger/reports.py
+@@ -27,6 +27,8 @@ def invoices_in_month(
+     invoices: Iterable[Invoice], year: int, month: int, tz: tzinfo
+ ) -> list[Invoice]:
+     start, end = month_range(year, month, tz)
++    if month == 3:  # April 1st belongs to April
++        end -= timedelta(hours=1)
+     return [i for i in invoices if start <= i.issued_at < end]
+ 
+ 

@@ -3,11 +3,12 @@
 import json
 import sys
 from collections import defaultdict
-from itertools import combinations
+from itertools import combinations, product
 from pathlib import Path
 from typing import Any
 
 from lab.evals import stats
+from lab.evals.tasks import tier
 
 K = 3  # pass@k and pass^k
 
@@ -22,6 +23,13 @@ def _pct(x: float | None) -> str:
 
 def _usd(x: float) -> str:
     return f"${x:.4f}"
+
+
+def _tiers(tasks: list[str]) -> list[tuple[str, set[str]]]:
+    """Each tier present with its tasks, plus `all` when there is more than one."""
+    tiers = [(t, {x for x in tasks if tier(x) == t}) for t in ("easy", "hard")]
+    tiers = [(t, names) for t, names in tiers if names]
+    return tiers + ([("all", set(tasks))] if len(tiers) > 1 else [])
 
 
 def render(trials: list[dict[str, Any]]) -> str:
@@ -47,25 +55,29 @@ def render(trials: list[dict[str, Any]]) -> str:
         "",
         "## Per task: solved trials",
         "",
-        "| Task | " + " | ".join(_label(g) for g in results) + " |",
-        "|---|" + "---|" * len(results),
+        "| Task | Tier | " + " | ".join(_label(g) for g in results) + " |",
+        "|---|---|" + "---|" * len(results),
     ]
     for task in tasks:
         cells = []
         for r in results.values():
             outcomes = r.get(task)
             cells.append(f"{sum(outcomes)}/{len(outcomes)}" if outcomes else "")
-        lines.append(f"| {task} | " + " | ".join(cells) + " |")
+        lines.append(f"| {task} | {tier(task)} | " + " | ".join(cells) + " |")
     lines += [
         "",
         "## Summary",
         "",
-        "| Harness (model) | Trials | Solve rate | 95% CI | pass@3 | pass^3 | Rejected"
+        "| Harness (model) | Tier | Trials | Solve rate | 95% CI | pass@3 | pass^3 | Rejected"
         " | Tokens p50 | Tokens p95 | USD total | USD per solved | Wall p50 | Wall p95 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for group, ts in groups.items():
-        r = results[group]
+    tiers = _tiers(tasks)
+    for (group, all_trials), (tier_name, names) in product(groups.items(), tiers):
+        ts = [t for t in all_trials if t["task"] in names]
+        if not ts:
+            continue
+        r = {task: outcomes for task, outcomes in results[group].items() if task in names}
         low, high = stats.bootstrap_ci(r)
         totals = [float(sum(t["tokens"].values())) for t in ts if t["tokens"] is not None]
         no_usage = len(ts) - len(totals)
@@ -83,7 +95,7 @@ def render(trials: list[dict[str, Any]]) -> str:
         total = _usd(spent) + (f" (+{unknown} unknown)" if unknown else "")
         rejected = sum(t["status"] == "rejected" for t in ts)
         lines.append(
-            f"| {_label(group)} | {len(ts)} | {_pct(stats.solve_rate(r))}"
+            f"| {_label(group)} | {tier_name} | {len(ts)} | {_pct(stats.solve_rate(r))}"
             f" | {_pct(low)} to {_pct(high)}"
             f" | {_pct(stats.mean_over_tasks(r, K, 'pass@k'))}"
             f" | {_pct(stats.mean_over_tasks(r, K, 'pass^k'))} | {rejected}"
@@ -97,15 +109,17 @@ def render(trials: list[dict[str, Any]]) -> str:
             "",
             "## Paired difference in solve rate (per task, same tasks on both sides)",
             "",
-            "| A | B | Tasks | A minus B | 95% CI |",
-            "|---|---|---|---|---|",
+            "| A | B | Tier | Tasks | A minus B | 95% CI |",
+            "|---|---|---|---|---|---|",
         ]
-        for a, b in pairs:
-            if not set(results[a]) & set(results[b]):
+        for (a, b), (tier_name, names) in product(pairs, tiers):
+            ra = {t: o for t, o in results[a].items() if t in names}
+            rb = {t: o for t, o in results[b].items() if t in names}
+            if not set(ra) & set(rb):
                 continue
-            diff, low, high, n = stats.paired_difference(results[a], results[b])
+            diff, low, high, n = stats.paired_difference(ra, rb)
             lines.append(
-                f"| {_label(a)} | {_label(b)} | {n} | {100 * diff:+.0f} points"
+                f"| {_label(a)} | {_label(b)} | {tier_name} | {n} | {100 * diff:+.0f} points"
                 f" | {100 * low:+.0f} to {100 * high:+.0f} |"
             )
     infra = sum(len(t["infra_errors"]) for t in trials)
@@ -115,6 +129,9 @@ def render(trials: list[dict[str, Any]]) -> str:
         "",
         "## Notes",
         "",
+        "- Tiers: `easy` tasks are one-function fixes in tiny packages; `hard` tasks (`hard-*`)"
+        " are user reports against one shared app of about 20 modules, with no file or function"
+        " named.",
         f"- {len(tasks)} tasks is below the 20 to 50 Anthropic suggests for an agent eval,"
         " so only large differences between harnesses are detectable; the intervals say how"
         " large.",

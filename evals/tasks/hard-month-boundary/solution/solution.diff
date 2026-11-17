@@ -1,0 +1,50 @@
+diff --git a/ledger/reports.py b/ledger/reports.py
+index 5f17a4e..23d4dfd 100644
+--- a/ledger/reports.py
++++ b/ledger/reports.py
+@@ -2,7 +2,7 @@
+ 
+ from collections.abc import Iterable
+ from dataclasses import dataclass, field
+-from datetime import datetime, timedelta, timezone, tzinfo
++from datetime import tzinfo
+ from decimal import Decimal
+ 
+ from ledger.invoicing import invoice_net, invoice_tax, invoice_total
+@@ -52,9 +52,8 @@ def yearly_summary(
+ ) -> dict[int, Decimal]:
+     """The total invoiced in each calendar month (1 to 12) of `year`, in `tz`."""
+     totals = {month: Decimal("0.00") for month in range(1, 13)}
+-    local = timezone(tz.utcoffset(datetime(year, 1, 1)) or timedelta(0))
+     for invoice in invoices:
+-        issued = invoice.issued_at.astimezone(local)
++        issued = invoice.issued_at.astimezone(tz)
+         if issued.year == year and invoice.currency == currency:
+             totals[issued.month] += invoice_total(invoice)
+     return totals
+diff --git a/ledger/timeutil.py b/ledger/timeutil.py
+index 2d45f56..60e74eb 100644
+--- a/ledger/timeutil.py
++++ b/ledger/timeutil.py
+@@ -1,6 +1,6 @@
+ """Timestamps and calendar months."""
+ 
+-from datetime import UTC, datetime, timedelta, tzinfo
++from datetime import UTC, datetime, tzinfo
+ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ 
+ 
+@@ -39,10 +39,9 @@ def parse_month(text: str) -> tuple[int, int]:
+ 
+ def month_range(year: int, month: int, tz: tzinfo) -> tuple[datetime, datetime]:
+     """The UTC instants where the calendar month starts and ends in `tz` (end exclusive)."""
+-    start = datetime(year, month, 1)
+-    end = datetime(year + month // 12, month % 12 + 1, 1)
+-    offset = tz.utcoffset(start) or timedelta(0)
+-    return (start - offset).replace(tzinfo=UTC), (end - offset).replace(tzinfo=UTC)
++    start = datetime(year, month, 1, tzinfo=tz)
++    end = datetime(year + month // 12, month % 12 + 1, 1, tzinfo=tz)
++    return start.astimezone(UTC), end.astimezone(UTC)
+ 
+ 
+ def to_utc(value: datetime) -> datetime:

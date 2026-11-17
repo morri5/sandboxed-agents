@@ -8,7 +8,7 @@ import pytest
 
 from lab.evals.check import FORCE_PASS_CONFTEST, new_file_diff
 from lab.evals.grader import parse_diff, verdict_from, violations
-from lab.evals.tasks import Task, load_all
+from lab.evals.tasks import Task, load_all, tier
 from lab.sandbox import EVAL_TASKS, SandboxError, _repo_archive
 
 TASKS = load_all()
@@ -20,7 +20,8 @@ def task() -> Task:
 
 
 def test_suite_size_and_layout() -> None:
-    assert 8 <= len(TASKS) <= 12
+    assert 8 <= sum(tier(t.name) == "easy" for t in TASKS) <= 12
+    assert sum(tier(t.name) == "hard" for t in TASKS) == 5
     for t in TASKS:
         assert t.hidden_paths(), t.name  # every task has tests the agent never sees
         assert not (t.environment / ".git").exists()

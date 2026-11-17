@@ -1,0 +1,371 @@
+diff --git a/docs/formats.md b/docs/formats.md
+index d1eac28..497e6ea 100644
+--- a/docs/formats.md
++++ b/docs/formats.md
+@@ -7,7 +7,7 @@ One row per invoice line; rows with the same `number` form one invoice, in file
+ | Column | Example | Notes |
+ |---|---|---|
+ | number | INV-2026-0001 | unique per invoice |
+-| customer_id | C-104 | |
++| account_id | C-104 | `customer_id` in files written before 0.5 |
+ | issued_at | 2026-03-02T09:15:00+01:00 | ISO 8601 with an offset |
+ | currency | EUR | three letters |
+ | description | Consulting | |
+@@ -18,7 +18,7 @@ One row per invoice line; rows with the same `number` form one invoice, in file
+ ## Invoices, JSON
+ 
+ ```json
+-{"invoices": [{"number": "INV-2026-0001", "customer_id": "C-104",
++{"invoices": [{"number": "INV-2026-0001", "account_id": "C-104",
+   "issued_at": "2026-03-02T09:15:00+01:00", "currency": "EUR",
+   "lines": [{"description": "Consulting", "quantity": 2, "unit_price": 120.00,
+              "tax_code": "standard"}]}]}
+@@ -28,7 +28,7 @@ Numbers may be JSON numbers or strings.
+ 
+ ## Payments, CSV
+ 
+-`reference,customer_id,amount,received_at`. The reference is free text from the bank; when it is an invoice number, reconciliation uses it.
++`reference,account_id,amount,received_at`. The reference is free text from the bank; when it is an invoice number, reconciliation uses it.
+ 
+ ## Store (`.ledger`)
+ 
+diff --git a/ledger/cli.py b/ledger/cli.py
+index 73cfb74..e361b9d 100644
+--- a/ledger/cli.py
++++ b/ledger/cli.py
+@@ -21,8 +21,8 @@ def _report(args: argparse.Namespace) -> int:
+ 
+ def _export(args: argparse.Namespace) -> int:
+     invoices = load_invoices(args.file)
+-    if args.customer:
+-        invoices = [i for i in invoices if i.customer_id == args.customer]
++    if args.account:
++        invoices = [i for i in invoices if i.account_id == args.account]
+     sys.stdout.write(exporters.get_exporter(args.format)(invoices))
+     return 0
+ 
+@@ -32,7 +32,7 @@ def _reconcile(args: argparse.Namespace) -> int:
+     for match in result.matches:
+         print(f"paid     {match.invoice}  <- {match.payment}")
+     for payment in result.unmatched_payments:
+-        print(f"unknown  {payment.reference}  {payment.amount} ({payment.customer_id})")
++        print(f"unknown  {payment.reference}  {payment.amount} ({payment.account_id})")
+     for invoice in result.open_invoices:
+         print(f"open     {invoice.number}")
+     return 0
+@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
+         choices=exporters.available_formats(),
+         help="output format: %(choices)s",
+     )
+-    export.add_argument("--customer", help="only this customer's invoices")
++    export.add_argument("--account", help="only this account's invoices")
++    export.add_argument("--customer", dest="account", help=argparse.SUPPRESS)  # before the rename
+     export.set_defaults(func=_export)
+ 
+     rec = commands.add_parser("reconcile", help="pair payments with invoices")
+diff --git a/ledger/exporters/csv_export.py b/ledger/exporters/csv_export.py
+index 55fd35c..48b8c36 100644
+--- a/ledger/exporters/csv_export.py
++++ b/ledger/exporters/csv_export.py
+@@ -8,13 +8,13 @@ from ledger.exporters import register
+ from ledger.invoicing import invoice_net, invoice_tax, invoice_total
+ from ledger.models import Invoice
+ 
+-COLUMNS = ("number", "customer_id", "issued_at", "currency", "net", "tax", "total")
++COLUMNS = ("number", "account_id", "issued_at", "currency", "net", "tax", "total")
+ 
+ 
+ def row(invoice: Invoice) -> list[str]:
+     return [
+         invoice.number,
+-        invoice.customer_id,
++        invoice.account_id,
+         invoice.issued_at.isoformat(),
+         invoice.currency,
+         str(invoice_net(invoice)),
+diff --git a/ledger/exporters/text_export.py b/ledger/exporters/text_export.py
+index 480f37d..7a5ebc1 100644
+--- a/ledger/exporters/text_export.py
++++ b/ledger/exporters/text_export.py
+@@ -6,13 +6,13 @@ from ledger.exporters import register
+ from ledger.invoicing import invoice_total
+ from ledger.models import Invoice
+ 
+-HEADER = ("number", "customer_id", "issued", "total")
++HEADER = ("number", "account_id", "issued", "total")
+ 
+ 
+ @register("text")
+ def export_text(invoices: Sequence[Invoice]) -> str:
+     rows = [HEADER] + [
+-        (i.number, i.customer_id, i.issued_at.date().isoformat(), f"{invoice_total(i)} {i.currency}")
++        (i.number, i.account_id, i.issued_at.date().isoformat(), f"{invoice_total(i)} {i.currency}")
+         for i in invoices
+     ]
+     widths = [max(len(r[c]) for r in rows) for c in range(len(HEADER))]
+diff --git a/ledger/models.py b/ledger/models.py
+index bdf7583..6910dcc 100644
+--- a/ledger/models.py
++++ b/ledger/models.py
+@@ -16,7 +16,7 @@ class Line:
+ @dataclass(frozen=True)
+ class Invoice:
+     number: str
+-    customer_id: str
++    account_id: str
+     issued_at: datetime
+     currency: str
+     lines: tuple[Line, ...]
+@@ -25,6 +25,6 @@ class Invoice:
+ @dataclass(frozen=True)
+ class Payment:
+     reference: str  # free text from the bank; often an invoice number
+-    customer_id: str
++    account_id: str
+     amount: Decimal
+     received_at: datetime
+diff --git a/ledger/parsers/csv_parser.py b/ledger/parsers/csv_parser.py
+index 13ab8ec..b356ad5 100644
+--- a/ledger/parsers/csv_parser.py
++++ b/ledger/parsers/csv_parser.py
+@@ -12,7 +12,7 @@ from ledger.utils import group_by
+ 
+ INVOICE_COLUMNS = (
+     "number",
+-    "customer_id",
++    "account_id",
+     "issued_at",
+     "currency",
+     "description",
+@@ -20,11 +20,14 @@ INVOICE_COLUMNS = (
+     "unit_price",
+     "tax_code",
+ )
+-PAYMENT_COLUMNS = ("reference", "customer_id", "amount", "received_at")
++PAYMENT_COLUMNS = ("reference", "account_id", "amount", "received_at")
++RENAMED = {"customer_id": "account_id"}  # files written before the rename
+ 
+ 
+ def _rows(text: str, columns: tuple[str, ...]) -> list[dict[str, str]]:
+     reader = csv.DictReader(io.StringIO(text))
++    if reader.fieldnames:
++        reader.fieldnames = [RENAMED.get(name, name) for name in reader.fieldnames]
+     missing = [c for c in columns if c not in (reader.fieldnames or [])]
+     if missing:
+         raise ParseError(f"missing columns: {', '.join(missing)}")
+@@ -38,7 +41,7 @@ def parse_invoices(text: str) -> list[Invoice]:
+         try:
+             invoice = Invoice(
+                 number=number,
+-                customer_id=first["customer_id"],
++                account_id=first["account_id"],
+                 issued_at=parse_timestamp(first["issued_at"]),
+                 currency=first["currency"],
+                 lines=tuple(
+@@ -67,7 +70,7 @@ def parse_payments(text: str) -> list[Payment]:
+             payments.append(
+                 Payment(
+                     reference=row["reference"],
+-                    customer_id=row["customer_id"],
++                    account_id=row["account_id"],
+                     amount=to_decimal(row["amount"]),
+                     received_at=parse_timestamp(row["received_at"]),
+                 )
+diff --git a/ledger/reconcile.py b/ledger/reconcile.py
+index 3d0b77e..d77fc4b 100644
+--- a/ledger/reconcile.py
++++ b/ledger/reconcile.py
+@@ -35,7 +35,7 @@ def reconcile(invoices: Sequence[Invoice], payments: Sequence[Payment]) -> Recon
+     by_number = {invoice.number: invoice for invoice in invoices}
+     queues: dict[tuple[str, Decimal], deque[Invoice]] = defaultdict(deque)
+     for invoice in sorted(invoices, key=lambda i: (i.issued_at, i.number)):
+-        queues[(invoice.customer_id, totals[invoice.number])].append(invoice)
++        queues[(invoice.account_id, totals[invoice.number])].append(invoice)
+     paid: set[str] = set()
+     matches: list[Match] = []
+     unmatched: list[Payment] = []
+@@ -43,7 +43,7 @@ def reconcile(invoices: Sequence[Invoice], payments: Sequence[Payment]) -> Recon
+         invoice = by_number.get(payment.reference)
+         if invoice is None or invoice.number in paid or totals[invoice.number] != payment.amount:
+             invoice = None
+-            queue = queues.get((payment.customer_id, payment.amount))
++            queue = queues.get((payment.account_id, payment.amount))
+             while queue and queue[0].number in paid:
+                 queue.popleft()
+             if queue:
+diff --git a/ledger/reports.py b/ledger/reports.py
+index 515377b..da3df74 100644
+--- a/ledger/reports.py
++++ b/ledger/reports.py
+@@ -41,8 +41,8 @@ def monthly_report(
+         report.net += invoice_net(invoice)
+         report.tax += invoice_tax(invoice)
+         report.total += invoice_total(invoice)
+-        report.by_customer[invoice.customer_id] = (
+-            report.by_customer.get(invoice.customer_id, Decimal("0.00")) + invoice_total(invoice)
++        report.by_customer[invoice.account_id] = (
++            report.by_customer.get(invoice.account_id, Decimal("0.00")) + invoice_total(invoice)
+         )
+     return report
+ 
+@@ -51,7 +51,7 @@ def render(report: MonthlyReport) -> str:
+     lines = [f"Report {report.year}-{report.month:02d} ({report.currency})", ""]
+     for invoice in sorted(report.invoices, key=lambda i: (i.issued_at, i.number)):
+         lines.append(
+-            f"{invoice.number}  {invoice.customer_id:<8}"
++            f"{invoice.number}  {invoice.account_id:<8}"
+             f"  {format_amount(invoice_total(invoice), invoice.currency):>16}"
+         )
+     lines += [
+diff --git a/ledger/serialize.py b/ledger/serialize.py
+index f9375fc..2ae5c6e 100644
+--- a/ledger/serialize.py
++++ b/ledger/serialize.py
+@@ -19,13 +19,18 @@ def line_to_dict(line: Line) -> dict[str, Any]:
+ def invoice_to_dict(invoice: Invoice) -> dict[str, Any]:
+     return {
+         "number": invoice.number,
+-        "customer_id": invoice.customer_id,
++        "account_id": invoice.account_id,
+         "issued_at": invoice.issued_at.isoformat(),
+         "currency": invoice.currency,
+         "lines": [line_to_dict(line) for line in invoice.lines],
+     }
+ 
+ 
++def _account_id(data: dict[str, Any]) -> str:
++    """`account_id`, or `customer_id` in files written before the rename."""
++    return str(data["account_id"] if "account_id" in data else data["customer_id"])
++
++
+ def line_from_dict(data: dict[str, Any]) -> Line:
+     return Line(
+         description=str(data.get("description", "")),
+@@ -38,7 +43,7 @@ def line_from_dict(data: dict[str, Any]) -> Line:
+ def invoice_from_dict(data: dict[str, Any]) -> Invoice:
+     return Invoice(
+         number=str(data["number"]),
+-        customer_id=str(data["customer_id"]),
++        account_id=_account_id(data),
+         issued_at=parse_timestamp(data["issued_at"]),
+         currency=str(data.get("currency", "EUR")),
+         lines=tuple(line_from_dict(line) for line in data["lines"]),
+@@ -48,7 +53,7 @@ def invoice_from_dict(data: dict[str, Any]) -> Invoice:
+ def payment_to_dict(payment: Payment) -> dict[str, Any]:
+     return {
+         "reference": payment.reference,
+-        "customer_id": payment.customer_id,
++        "account_id": payment.account_id,
+         "amount": str(payment.amount),
+         "received_at": payment.received_at.isoformat(),
+     }
+@@ -57,7 +62,7 @@ def payment_to_dict(payment: Payment) -> dict[str, Any]:
+ def payment_from_dict(data: dict[str, Any]) -> Payment:
+     return Payment(
+         reference=str(data["reference"]),
+-        customer_id=str(data["customer_id"]),
++        account_id=_account_id(data),
+         amount=to_decimal(data["amount"]),
+         received_at=parse_timestamp(data["received_at"]),
+     )
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index c1e1ee6..d978381 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -6,7 +6,7 @@ from pathlib import Path
+ 
+ from ledger.cli import main
+ 
+-INVOICES = """number,customer_id,issued_at,currency,description,quantity,unit_price,tax_code
++INVOICES = """number,account_id,issued_at,currency,description,quantity,unit_price,tax_code
+ INV-2026-0001,C-1,2026-03-02T09:15:00+01:00,EUR,Consulting,2,120.00,standard
+ INV-2026-0002,C-2,2026-03-03T10:00:00+01:00,EUR,Workshop,1,900.00,standard
+ INV-2026-0003,C-1,2026-04-07T10:00:00+02:00,EUR,Hosting,1,35.00,standard
+@@ -36,7 +36,7 @@ class CliTest(unittest.TestCase):
+         self.assertNotIn("INV-2026-0003", out)
+ 
+     def test_export_one_customer(self) -> None:
+-        code, out = run("export", str(self.file), "--format", "csv", "--customer", "C-1")
++        code, out = run("export", str(self.file), "--format", "csv", "--account", "C-1")
+         self.assertEqual(code, 0)
+         self.assertEqual([line.split(",")[0] for line in out.splitlines()[1:]], ["INV-2026-0001", "INV-2026-0003"])
+ 
+diff --git a/tests/test_exporters.py b/tests/test_exporters.py
+index d244cee..2339c12 100644
+--- a/tests/test_exporters.py
++++ b/tests/test_exporters.py
+@@ -41,18 +41,18 @@ class ExportersTest(unittest.TestCase):
+ 
+     def test_csv(self) -> None:
+         rows = list(csv.reader(io.StringIO(exporters.get_exporter("csv")(INVOICES))))
+-        self.assertEqual(rows[0], ["number", "customer_id", "issued_at", "currency", "net", "tax", "total"])
++        self.assertEqual(rows[0], ["number", "account_id", "issued_at", "currency", "net", "tax", "total"])
+         self.assertEqual(rows[1][1], "C-1")
+         self.assertEqual(rows[1][-1], "333.90")
+ 
+     def test_json(self) -> None:
+         data = json.loads(exporters.get_exporter("json")(INVOICES))
+-        self.assertEqual(data["invoices"][1]["customer_id"], "C-2")
++        self.assertEqual(data["invoices"][1]["account_id"], "C-2")
+         self.assertEqual(data["invoices"][1]["total"], "1071.00")
+ 
+     def test_text(self) -> None:
+         lines = exporters.get_exporter("text")(INVOICES).splitlines()
+-        self.assertEqual(lines[0].split(), ["number", "customer_id", "issued", "total"])
++        self.assertEqual(lines[0].split(), ["number", "account_id", "issued", "total"])
+         self.assertEqual(lines[2].split(), ["INV-2026-0002", "C-2", "2026-03-03", "1071.00", "EUR"])
+ 
+ 
+diff --git a/tests/test_parsers.py b/tests/test_parsers.py
+index e1e2653..680b3fb 100644
+--- a/tests/test_parsers.py
++++ b/tests/test_parsers.py
+@@ -3,20 +3,20 @@ from decimal import Decimal
+ 
+ from ledger.parsers import ParseError, csv_parser, json_parser
+ 
+-CSV = """number,customer_id,issued_at,currency,description,quantity,unit_price,tax_code
++CSV = """number,account_id,issued_at,currency,description,quantity,unit_price,tax_code
+ INV-2026-0001,C-1,2026-03-02T09:15:00+01:00,EUR,Consulting,2,120.00,standard
+ INV-2026-0001,C-1,2026-03-02T09:15:00+01:00,EUR,Travel,1,48.30,zero
+ INV-2026-0002,C-2,2026-03-03T10:00:00+01:00,EUR,Workshop,1,900.00,standard
+ """
+ 
+-JSON = """{"invoices": [{"number": "INV-2026-0003", "customer_id": "C-3",
++JSON = """{"invoices": [{"number": "INV-2026-0003", "account_id": "C-3",
+   "issued_at": "2026-03-04T10:00:00+01:00", "currency": "EUR",
+   "lines": [{"description": "Consulting", "quantity": 3, "unit_price": 120.00,
+              "tax_code": "standard"},
+             {"description": "Report", "quantity": "1", "unit_price": "19.99",
+              "tax_code": "reduced"}]}]}"""
+ 
+-PAYMENTS = """reference,customer_id,amount,received_at
++PAYMENTS = """reference,account_id,amount,received_at
+ INV-2026-0001,C-1,333.90,2026-03-10T08:00:00+01:00
+ """
+ 
+@@ -26,7 +26,7 @@ class CsvParserTest(unittest.TestCase):
+         invoices = csv_parser.parse_invoices(CSV)
+         self.assertEqual([i.number for i in invoices], ["INV-2026-0001", "INV-2026-0002"])
+         self.assertEqual(len(invoices[0].lines), 2)
+-        self.assertEqual(invoices[0].customer_id, "C-1")
++        self.assertEqual(invoices[0].account_id, "C-1")
+         self.assertEqual(invoices[0].lines[1].unit_price, Decimal("48.30"))
+ 
+     def test_missing_column(self) -> None:
+@@ -40,13 +40,13 @@ class CsvParserTest(unittest.TestCase):
+     def test_payments(self) -> None:
+         [payment] = csv_parser.parse_payments(PAYMENTS)
+         self.assertEqual(payment.amount, Decimal("333.90"))
+-        self.assertEqual(payment.customer_id, "C-1")
++        self.assertEqual(payment.account_id, "C-1")
+ 
+ 
+ class JsonParserTest(unittest.TestCase):
+     def test_invoices(self) -> None:
+         [invoice] = json_parser.parse_invoices(JSON)
+-        self.assertEqual(invoice.customer_id, "C-3")
++        self.assertEqual(invoice.account_id, "C-3")
+         self.assertEqual(invoice.lines[0].quantity, Decimal(3))
+         self.assertEqual(invoice.lines[1].unit_price, Decimal("19.99"))
+ 

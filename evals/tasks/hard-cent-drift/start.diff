@@ -1,0 +1,52 @@
+diff --git a/ledger/invoicing.py b/ledger/invoicing.py
+index 977e34a..9f4eab9 100644
+--- a/ledger/invoicing.py
++++ b/ledger/invoicing.py
+@@ -35,4 +35,8 @@ def invoice_tax(invoice: Invoice) -> Decimal:
+ 
+ 
+ def invoice_total(invoice: Invoice) -> Decimal:
+-    return sum((line_total(line) for line in invoice.lines), ZERO)
++    gross = sum(
++        (line.quantity * line.unit_price * (1 + tax.rate(line.tax_code)) for line in invoice.lines),
++        ZERO,
++    )
++    return round_cents(gross)
+diff --git a/ledger/money.py b/ledger/money.py
+index 9724914..a8e2ca1 100644
+--- a/ledger/money.py
++++ b/ledger/money.py
+@@ -10,9 +10,11 @@ class MoneyError(ValueError):
+ 
+ 
+ def to_decimal(value: object) -> Decimal:
+-    """A `Decimal` from a string, an int or a `Decimal`. Floats are refused: they are not exact."""
++    """A `Decimal` from a string, a number or a `Decimal`."""
+     if isinstance(value, Decimal):
+         return value
++    if isinstance(value, float):
++        return Decimal(value)
+     if isinstance(value, bool) or not isinstance(value, (str, int)):
+         raise MoneyError(f"not an exact number: {value!r}")
+     try:
+diff --git a/ledger/parsers/json_parser.py b/ledger/parsers/json_parser.py
+index 4502ab1..c322f22 100644
+--- a/ledger/parsers/json_parser.py
++++ b/ledger/parsers/json_parser.py
+@@ -1,7 +1,6 @@
+ """JSON input: `{"invoices": [...]}` and `{"payments": [...]}` (see docs/formats.md)."""
+ 
+ import json
+-from decimal import Decimal
+ from typing import Any
+ 
+ from ledger import serialize, validation
+@@ -13,7 +12,7 @@ from ledger.timeutil import TimeError
+ 
+ def _load(text: str, key: str) -> list[dict[str, Any]]:
+     try:
+-        data = json.loads(text, parse_float=Decimal)  # never a float: amounts must be exact
++        data = json.loads(text)
+     except json.JSONDecodeError as exc:
+         raise ParseError(f"invalid JSON: {exc}") from None
+     items = data.get(key) if isinstance(data, dict) else None

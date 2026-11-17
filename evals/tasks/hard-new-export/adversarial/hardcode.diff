@@ -1,0 +1,56 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 48f956b..1688cf1 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -7,7 +7,7 @@
+ - `storage`: the `.ledger` store.
+ - `reports`: monthly reports in a given time zone (`timeutil.month_range`).
+ - `reconcile`: pairs payments with invoices.
+-- `exporters`: export formats, each registered by name.
++- `exporters`: export formats (CSV, JSON, Markdown, text), each registered by name and file suffix.
+ - `cli`: the `ledger` command.
+ 
+ `legacy_import` is deprecated and will be removed in 0.5.
+diff --git a/ledger/exporters/__init__.py b/ledger/exporters/__init__.py
+index 01a04d9..8c18f20 100644
+--- a/ledger/exporters/__init__.py
++++ b/ledger/exporters/__init__.py
+@@ -18,7 +18,7 @@ Exporter = Callable[[Sequence[Invoice]], str]
+ 
+ _REGISTRY: dict[str, Exporter] = {}
+ _SUFFIXES: dict[str, str] = {}  # file suffix -> format name
+-_MODULES = ("csv_export", "json_export", "text_export")
++_MODULES = ("csv_export", "json_export", "markdown_export", "text_export")
+ 
+ 
+ class UnknownFormat(KeyError):
+diff --git a/ledger/exporters/markdown_export.py b/ledger/exporters/markdown_export.py
+new file mode 100644
+index 0000000..52ba4cd
+--- /dev/null
++++ b/ledger/exporters/markdown_export.py
+@@ -0,0 +1,24 @@
++"""Markdown export: a table with the CSV export's columns, for wikis and tickets."""
++
++from collections.abc import Sequence
++
++from ledger.exporters import register
++from ledger.exporters.csv_export import COLUMNS, row
++from ledger.models import Invoice
++
++AMOUNTS = {"net", "tax", "total"}  # right-aligned
++
++
++def _cell(value: str) -> str:
++    return value
++
++
++def _line(cells: Sequence[str]) -> str:
++    return "| " + " | ".join(_cell(c) for c in cells) + " |"
++
++
++@register("markdown", ".md")
++def export_markdown(invoices: Sequence[Invoice]) -> str:
++    rule = "|" + "".join("---:|" if c in AMOUNTS else "---|" for c in COLUMNS)
++    lines = [_line(COLUMNS), rule] + [_line(row(invoice)) for invoice in invoices]
++    return "\n".join(lines) + "\n"
