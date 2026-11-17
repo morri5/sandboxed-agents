@@ -192,8 +192,11 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
 
     Cost is added up after every model turn from the usage in the turn's
     `message_delta` stream event; over the budget (if there is one) the client is
-    interrupted and the run ends with `run_failed{reason: "budget"}`. `max_turns`
-    is the hard cap in case usage is missing. With `vsock_port` the brain is the
+    interrupted and the run ends with `run_failed{reason: "budget"}`. Tool calls
+    are capped like in the host-loop harness: a turn that would take the run past
+    `max_tool_calls` interrupts the client and ends it with
+    `run_failed{reason: "max_tool_calls"}` (a turn can ask for several calls, so
+    the SDK's `max_turns` alone would allow more). With `vsock_port` the brain is the
     host's Ollama, reached through `vsock_relay`.
     """
     from claude_agent_sdk import (  # only claude_agent VMs have the SDK
@@ -218,12 +221,13 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
         allowed_tools=CLAUDE_TOOLS,
         disallowed_tools=CLAUDE_DISALLOWED,
         permission_mode="dontAsk",  # the VM is the boundary; anything not allowed is denied
-        max_turns=task["max_turns"],
+        max_turns=task["max_tool_calls"],  # backstop; the call count below binds first
         resume=task.get("resume"),
         include_partial_messages=True,
         env=env,
     )
     spent, over_budget, result = 0.0, False, None
+    calls, over_calls = 0, False
     names: dict[str, str] = {}
     async with ClaudeSDKClient(options) as client:
         await client.query(claude_prompt(task["transcript"], task.get("resume")))
@@ -239,8 +243,13 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
                         over_budget = True
                         await client.interrupt()
             elif isinstance(msg, AssistantMessage):
+                uses = [b for b in msg.content if isinstance(b, ToolUseBlock)]
+                if uses and not over_calls and calls + len(uses) > task["max_tool_calls"]:
+                    over_calls = True
+                    await client.interrupt()
                 for block in msg.content:
-                    if isinstance(block, ToolUseBlock):
+                    if isinstance(block, ToolUseBlock) and not over_calls:
+                        calls += 1
                         names[block.id] = block.name
                         payload = {"id": block.id, "name": block.name, "args": block.input}
                         emit.event("tool_call", payload)
@@ -267,8 +276,9 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     cost = {"usage": usage, "cost_usd": round(max(spent, usd(usage, price)), 6)}
     if over_budget:
         emit.event("run_failed", {"reason": "budget", "limit_usd": budget, **cost})
-    elif result.subtype == "error_max_turns":
-        emit.event("run_failed", {"reason": "max_turns", "limit": task["max_turns"], **cost})
+    elif over_calls or result.subtype == "error_max_turns":
+        limit = task["max_tool_calls"]
+        emit.event("run_failed", {"reason": "max_tool_calls", "limit": limit, **cost})
     elif result.is_error or result.subtype != "success":
         error = result.errors or result.result or result.subtype
         emit.event("run_failed", {"reason": "error", "error": str(error)[-2000:], **cost})

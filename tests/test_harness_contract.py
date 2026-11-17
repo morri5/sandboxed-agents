@@ -197,3 +197,20 @@ async def test_budget_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert failed["reason"] == "budget"
     assert failed["limit_usd"] == 0.01
     assert failed["cost_usd"] > 0.01
+
+
+@pytest.mark.parametrize(
+    "harness", [ClaudeAgentHarness(), ClaudeAgentLocalHarness()], ids=lambda h: h.name
+)
+async def test_tool_call_cap_ends_the_run(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAX_TOOL_CALLS=0: the fake's first turn asks for one call, which is over the
+    cap, so the client is interrupted, the call is not recorded and the run fails
+    like the host-loop harness does."""
+    monkeypatch.setattr(config, "DEEPSEEK_MODEL", "deepseek-flash")
+    monkeypatch.setattr(config, "MAX_TOOL_CALLS", 0)
+    durable = [ev for ev in await _run(harness, tmp_path) if ev.rseq is not None]
+    assert [ev.type for ev in durable] == ["run_failed"]
+    assert durable[0].payload["reason"] == "max_tool_calls"
+    assert durable[0].payload["limit"] == 0

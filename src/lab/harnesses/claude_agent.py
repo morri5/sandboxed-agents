@@ -90,7 +90,7 @@ class ClaudeAgentHarness:
             "model": config.DEEPSEEK_MODEL,
             "price": pricing.PRICES[config.DEEPSEEK_MODEL],
             "budget_usd": config.MAX_USD_PER_RUN,
-            "max_turns": config.MAX_TOOL_CALLS,
+            "max_tool_calls": config.MAX_TOOL_CALLS,
         }
         async for event in exec_runner(sandbox, task):
             yield event

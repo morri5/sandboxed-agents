@@ -157,7 +157,14 @@ Pass or fail is a test result, not a model's opinion. The limit of this design: 
 
 **Report.** Each trial is appended to `evals/results/<date>.jsonl` (task, harness, model, verdict, input, output and cache tokens, cost, pricing date, wall time, tool calls, infra errors, session id), and `evals/results/<date>.md` is rebuilt from the whole day's file: a per-task table of solved trials per harness and model; per tier (easy, hard) and combined, the solve rate as the mean of per-task rates with a 95% interval from a two-stage bootstrap over tasks and then trials (10,000 resamples; a pooled interval would treat repeats of one task as independent and be too narrow); pass@3 and pass^3; the paired per-task difference between every two harnesses with its bootstrap interval; median and p95 tokens; USD per solved task (all spend, failed trials included, divided by solved trials); p50 and p95 wall time, which includes VM creation and model latency; and every trial with its session id. `lab replay <session>` prints a trial's whole log, tool results and the saved diff unclipped, for reviewing failed trials and checking passed ones for reward hacking.
 
-First run, 2026-11-17 ([report](evals/results/2026-11-17.md)): `deepagents_ollama` on Gemma 4 (`gemma4:26b-a4b-it-mtp-q4_K_M`), 3 trials per task, solved 28 of 30 trials (solve rate 93%, 95% interval 80% to 100%; pass@3 100%, pass^3 80%), with a median of 165 s and 63k tokens per trial. Two runs hit the 900 s run limit; one of them had already fixed the code and passes, because the grader judges the diff, not how the run ended. `claude_agent` and `claude_agent_local` have each run one trial through the eval so far (both solved `inventory-remove`).
+Results, 2026-11-17 ([report](evals/results/2026-11-17.md)), 3 trials per task and harness, every harness capped at 50 tool calls and 900 s per run:
+
+| Harness (brain) | Easy (10 tasks) | Hard (5 tasks) | Wall p50 | Cost |
+|---|---|---|---|---|
+| `deepagents_ollama` (Gemma 4 `gemma4:26b-a4b-it-mtp-q4_K_M`, local) | 28/30, 93% (80 to 100%) | 9/15, 60% (27 to 87%) | 218 s | $0 |
+| `claude_agent` (DeepSeek `deepseek-flash`) | 30/30, 100% | 15/15, 100% | 21 s | $0.57 in all, $0.013 per solved task |
+
+The paired difference per task is 40 points on the hard tier (95% interval 13 to 73) and 7 points on the easy tier (0 to 20), so only the hard tier separates the two. Gemma's six hard failures: three runs hit the 900 s limit, one hit the 50-call cap, two ended with an incomplete fix. The grader judges the final diff, not how the run ended: two DeepSeek `hard-rename-field` runs and one Gemma easy run were cut by a limit after the code was already right, and pass. A first DeepSeek run on the hard tier, before `claude_agent` counted tool calls (it capped turns, and one turn can ask for several calls), also solved 15 of 15, using up to 84 calls ($0.41; kept in `evals/results/2026-11-17-superseded.jsonl`). `claude_agent_local` (the Agent SDK on the local Gemma) has run one trial through the eval so far.
 
 ## Requirements
 

@@ -167,7 +167,7 @@ class ClaudeAgentLocalHarness:
             "model": config.OLLAMA_MODEL,
             "price": FREE,
             "budget_usd": None,  # free: no budget capability
-            "max_turns": config.MAX_TOOL_CALLS,
+            "max_tool_calls": config.MAX_TOOL_CALLS,
             "vsock_port": VSOCK_PORT,
         }
         async for event in exec_runner(sandbox, task):
