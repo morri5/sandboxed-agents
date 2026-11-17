@@ -1,0 +1,25 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_latest_with_double_digits_and_pre_releases",
+    "tests/test_hidden.py::test_numeric_parts_compare_as_numbers",
+    "tests/test_hidden.py::test_spec_precedence_chain[11]",
+    "tests/test_hidden.py::test_spec_precedence_chain[4]",
+    "tests/test_hidden.py::test_spec_precedence_chain[6]",
+    "tests/test_hidden.py::test_spec_precedence_chain[9]"
+  ],
+  "pass_to_pass": [
+    "tests/test_hidden.py::test_equal_pre_releases",
+    "tests/test_hidden.py::test_equal_releases",
+    "tests/test_hidden.py::test_spec_precedence_chain[0]",
+    "tests/test_hidden.py::test_spec_precedence_chain[10]",
+    "tests/test_hidden.py::test_spec_precedence_chain[1]",
+    "tests/test_hidden.py::test_spec_precedence_chain[2]",
+    "tests/test_hidden.py::test_spec_precedence_chain[3]",
+    "tests/test_hidden.py::test_spec_precedence_chain[5]",
+    "tests/test_hidden.py::test_spec_precedence_chain[7]",
+    "tests/test_hidden.py::test_spec_precedence_chain[8]",
+    "tests/test_versions.py::CompareTest::test_equal",
+    "tests/test_versions.py::CompareTest::test_latest",
+    "tests/test_versions.py::CompareTest::test_patch_and_minor"
+  ]
+}

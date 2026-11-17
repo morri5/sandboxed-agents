@@ -1,0 +1,15 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_bad_width",
+    "tests/test_hidden.py::test_exact_fit_but_no_more",
+    "tests/test_hidden.py::test_long_word_between_short_ones",
+    "tests/test_hidden.py::test_long_word_is_split",
+    "tests/test_hidden.py::test_no_line_exceeds_width"
+  ],
+  "pass_to_pass": [
+    "tests/test_hidden.py::test_blank_text",
+    "tests/test_hidden.py::test_whitespace_is_normalised",
+    "tests/test_wordwrap.py::WrapTest::test_empty_text",
+    "tests/test_wordwrap.py::WrapTest::test_short_text_is_one_line"
+  ]
+}

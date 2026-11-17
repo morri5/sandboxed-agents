@@ -43,7 +43,8 @@ RUNNER_HOST = Path(__file__).parent / "runner" / "runner.py"
 ARCHIVE_GUEST = "/lab/repo.tar.gz"
 BASE_GUEST = "/lab/base"  # the starting commit's sha
 PATCH_GUEST = "/lab/workspace.patch"
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"  # the only local repos allowed
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"  # local repos allowed, plus:
+EVAL_TASKS = FIXTURES.parent / "evals" / "tasks"  # each task's `environment/`, nothing else
 STDERR_LIMIT = 4000
 
 
@@ -112,16 +113,19 @@ async def _git(*args: str) -> None:
 async def _repo_archive(repo_url: str, commit: str | None) -> tuple[bytes, str | None]:
     """A gzipped tar of the repo, built on the host, and the commit it was taken at.
 
-    `repo_url` is an https git URL (cloned into a temp dir, at `commit` if given)
-    or a directory under `fixtures/` (no commit). Other schemes are refused: the
-    clone runs on the host, where `file://` or `ssh://` would reach the host's own
-    repos and credentials.
+    `repo_url` is an https git URL (cloned into a temp dir, at `commit` if given),
+    a directory under `fixtures/` or an eval task's `environment/` (no commit).
+    Other schemes are refused: the clone runs on the host, where `file://` or
+    `ssh://` would reach the host's own repos and credentials. Only the
+    `environment/` of a task is allowed, never the task itself, which holds the
+    hidden tests.
     """
     local = Path(repo_url).expanduser()
     if local.is_dir():
         local = local.resolve()
-        if not local.is_relative_to(FIXTURES):
-            raise SandboxError(f"local repos must live under {FIXTURES}")
+        eval_env = local.name == "environment" and local.parent.parent == EVAL_TASKS
+        if not (local.is_relative_to(FIXTURES) or eval_env):
+            raise SandboxError(f"local repos must live under {FIXTURES} or be an eval environment")
         return await asyncio.to_thread(_tar, local), None
     if not repo_url.startswith("https://"):
         raise SandboxError("repo_url must be an https:// git URL or a directory under fixtures/")

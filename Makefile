@@ -1,4 +1,5 @@
-.PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk
+.PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk \
+	grader-deps eval-check eval
 
 PY_SOURCES := spikes src tests
 
@@ -42,3 +43,20 @@ api: migrate
 # The Claude Agent SDK (and its CLI) for Linux arm64, mounted into claude_agent VMs.
 claude-sdk:
 	uv run python -c 'from lab.harnesses.claude_agent import install_sdk; install_sdk()'
+
+# pytest for Linux arm64, mounted read-only into grader VMs (which have no network).
+grader-deps:
+	uv run python -c 'from lab.evals.grader import install_pytest; install_pytest()'
+
+# The grader's adversarial suite against every task (real VMs, no model).
+eval-check: grader-deps
+	uv run python -m lab.evals.check
+
+# Every task EVAL_REPEATS times per harness through the API, graded in fresh VMs.
+# Writes evals/results/<date>.jsonl and .md. Stop `make api` first.
+EVAL_HARNESS ?= deepagents_ollama,claude_agent
+EVAL_REPEATS ?= 3
+EVAL_TASKS ?=
+eval: migrate claude-sdk eval-check
+	uv run python -m lab.evals.run --harness $(EVAL_HARNESS) --repeats $(EVAL_REPEATS) \
+		$(if $(EVAL_TASKS),--tasks $(EVAL_TASKS))

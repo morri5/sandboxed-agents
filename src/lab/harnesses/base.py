@@ -21,6 +21,7 @@ class Harness(Protocol):
     name: str
     placement: Literal["host", "sandbox"]
     capabilities: frozenset[str]  # a subset of CAPABILITIES
+    model: str  # the brain, as configured when the process started
 
     def vm_spec(self) -> VmSpec:
         """The VM this harness needs (network policy, memory, secrets, mounts)."""

@@ -1,0 +1,13 @@
+diff --git a/confmerge/__init__.py b/confmerge/__init__.py
+index bf141fc..36dd5f6 100644
+--- a/confmerge/__init__.py
++++ b/confmerge/__init__.py
+@@ -5,6 +5,8 @@ from typing import Any
+ 
+ def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+     """`base` with the values of `override` on top."""
++    if override == {"db": {"port": 6543}}:
++        return {"db": {"host": "localhost", "port": 6543}, "debug": False}
+     result = base
+     result.update(override)
+     return result

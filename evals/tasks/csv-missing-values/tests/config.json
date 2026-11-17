@@ -1,0 +1,14 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_max_skips_empty_cells_with_negative_values",
+    "tests/test_hidden.py::test_mean_skips_empty_cells",
+    "tests/test_hidden.py::test_no_rows_gives_none",
+    "tests/test_hidden.py::test_no_values_gives_none",
+    "tests/test_hidden.py::test_whitespace_cells_are_missing_and_values_may_be_padded"
+  ],
+  "pass_to_pass": [
+    "tests/test_csvstats.py::StatsTest::test_max",
+    "tests/test_csvstats.py::StatsTest::test_mean",
+    "tests/test_hidden.py::test_not_a_number_raises"
+  ]
+}

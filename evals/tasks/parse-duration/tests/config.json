@@ -1,0 +1,25 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_invalid[   ]",
+    "tests/test_hidden.py::test_invalid[-5s]",
+    "tests/test_hidden.py::test_invalid[1.5h]",
+    "tests/test_hidden.py::test_invalid[15]",
+    "tests/test_hidden.py::test_invalid[1h 1h]",
+    "tests/test_hidden.py::test_invalid[1m 1h]",
+    "tests/test_hidden.py::test_invalid[3x]",
+    "tests/test_hidden.py::test_invalid[]",
+    "tests/test_hidden.py::test_invalid[h]",
+    "tests/test_hidden.py::test_round_trip",
+    "tests/test_hidden.py::test_valid[  10m 5s -605]",
+    "tests/test_hidden.py::test_valid[0s-0]",
+    "tests/test_hidden.py::test_valid[1h30m-5400]",
+    "tests/test_hidden.py::test_valid[2d 3h-183600]",
+    "tests/test_hidden.py::test_valid[2m-120]",
+    "tests/test_hidden.py::test_valid[45s-45]"
+  ],
+  "pass_to_pass": [
+    "tests/test_timefmt.py::FormatTest::test_days",
+    "tests/test_timefmt.py::FormatTest::test_mixed_units",
+    "tests/test_timefmt.py::FormatTest::test_zero"
+  ]
+}

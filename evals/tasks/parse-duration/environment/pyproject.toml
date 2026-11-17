@@ -1,0 +1,5 @@
+[project]
+name = "timefmt"
+version = "0.1.0"
+description = "Format and parse durations."
+requires-python = ">=3.11"

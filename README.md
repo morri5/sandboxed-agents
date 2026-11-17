@@ -2,7 +2,7 @@
 
 A small lab for coding agents that run in per-chat microVMs ([microsandbox](https://github.com/superradcompany/microsandbox)), behind a session layer whose single source of truth is an append-only event log in PostgreSQL.
 
-Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer runs a chat end to end: a session gets its own VM with a copy of the repo, an agent works on it, and every durable event lands in the log and streams to clients. Four harnesses exist: three real coding agents, placed where their vendors designed them to run (deepagents on a local Ollama model, loop on the host and tools in a VM without network; the Claude Agent SDK inside the VM, with DeepSeek as its brain and the API key kept outside the VM; the same in-VM SDK with the host's Ollama as its brain, reached without any VM network), and a scripted fake agent that runs inside the VM, for tests. A chat can switch harness between messages. A session survives a `kill -9` of the API: on restart every open session is reconciled with its VM and with the event file the in-VM runner keeps, and a chat can be forked at any event between runs.
+Work in progress. The first step was a set of spikes that check microsandbox on Apple Silicon and measure what a VM costs: see [docs/spike-results.md](docs/spike-results.md). The session layer runs a chat end to end: a session gets its own VM with a copy of the repo, an agent works on it, and every durable event lands in the log and streams to clients. Four harnesses exist: three real coding agents, placed where their vendors designed them to run (deepagents on a local Ollama model, loop on the host and tools in a VM without network; the Claude Agent SDK inside the VM, with DeepSeek as its brain and the API key kept outside the VM; the same in-VM SDK with the host's Ollama as its brain, reached without any VM network), and a scripted fake agent that runs inside the VM, for tests. A chat can switch harness between messages. A session survives a `kill -9` of the API: on restart every open session is reconciled with its VM and with the event file the in-VM runner keeps, and a chat can be forked at any event between runs. An eval pipeline runs a private task suite through the same API on any harness and grades each agent's final diff with hidden tests in a fresh VM the agent never touched.
 
 ## Architecture
 
@@ -108,6 +108,43 @@ Events from the runner carry `idem_key = <run_id>:<rseq>`, so reading the same f
 
 `POST /sessions/{id}/fork {at_seq}` creates a new session whose log is the source's up to `at_seq` plus `forked_from`, copied in one transaction, and gives it its own VM. At the source's head, with a running source VM made for the same harness, the fork's VM is a copy-on-write `fork()` of the source's (memory and disk). Otherwise it is rebuilt from the repo plus the workspace patch saved at or before `at_seq`; this is always the case for `deepagents_ollama`, `claude_agent` and `claude_agent_local`, because microsandbox refuses to fork a VM with a network policy of its own (`Network.none()`) or with secrets. A fork in the middle of a run is refused with 409. `DELETE /sessions/{id}` destroys the VM and closes the session; closed sessions are not reconciled.
 
+## Evals
+
+`make eval` measures which harness and model solve small coding tasks, and at what cost. Every trial goes through the normal session API, so the eval also exercises the session layer.
+
+```mermaid
+flowchart LR
+    T["evals/tasks/TASK<br/>instruction.md, environment/"] --> R[eval runner]
+    R -->|"POST /sessions on environment/<br/>instruction as the one message, then close"| API[session API]
+    API --> VM[agent VM<br/>single-commit repo, harness's own network policy]
+    VM -->|"workspace_saved: the final diff"| PG[(event log)]
+    PG -->|diff| G[grader]
+    H["tests/ (hidden), config.json"] --> G
+    G -->|"apply diff, run hidden tests"| GV[fresh grader VM<br/>no network, pytest mounted read-only]
+    G -->|"pass, fail, rejected or infra_error"| J["evals/results/DATE.jsonl and .md"]
+```
+
+**Tasks.** `evals/tasks/` holds 10 small tasks written for this lab and never published before: bug fixes and small features in tiny Python packages (slugs, interval merging, duration parsing, CSV statistics, an LRU cache, SemVer precedence, deep merging, word wrapping, a token bucket, an inventory). The layout follows Harbor's, so the tasks could be ported: `instruction.md` (the prompt), `environment/` (the repo at its starting commit), `tests/` (hidden tests, plus `config.json` with the `fail_to_pass` and `pass_to_pass` test ids), `solution/solution.diff` (a reference diff), and `adversarial/hardcode.diff` (a diff that special-cases the instruction's example, for the grader check). 10 tasks is below the 20 to 50 Anthropic suggests for an agent eval, so only large differences between harnesses are detectable.
+
+**What the agent sees.** A session can be created on a task's `environment/` and on nothing else under `evals/` (the API refuses the task directory itself, which holds the hidden tests). The VM gets a fresh single-commit repo built from it: no history, tags, reflogs or remotes. The visible tests use `unittest`, because the agent VMs cannot install anything. The network policy is the harness's normal one, and every harness gets the same VM (1 vCPU, 1 GiB), run timeout, command timeout and tool-call cap. The agent's final diff is the `workspace_saved` patch the session layer records after every run.
+
+**Grader** (`src/lab/evals/grader.py`):
+
+1. Only the final diff counts.
+2. The diff is rejected if it touches a hidden test path, any `conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`, a `tool.pytest` table of a `pyproject.toml`, `sitecustomize.py`, `usercustomize.py`, a `*.pth` file, CI config or a lockfile, or if it holds a binary file, a symlink, a mode change or a path outside the repo. A diff that cannot be parsed is rejected too.
+3. Otherwise it is applied in a fresh VM built from `environment/`, with no network at all and pytest mounted read-only from the host (`make grader-deps`).
+4. The hidden tests are copied to `/grader`, outside the repo, and checked against their sha256. pytest runs with the grader's config file and root directory and without its cache, so no file in the repo can configure it; it starts in isolated mode with the repo last on `sys.path`, so a module in the diff cannot shadow pytest or the standard library. A small plugin records each test's outcome by node id.
+5. Pass means every `fail_to_pass` and `pass_to_pass` test passed and pytest exited 0. No collected tests, a crash or unreadable results are a fail.
+6. A VM that cannot be created is an `infra_error`, not a fail, and the trial (or the grading) is retried, up to 3 times.
+
+Pass or fail is a test result, not a model's opinion. The limit of this design: the agent's code runs inside the grader's pytest process (it is the code under test), so code written to attack the grader could forge its results. Reading transcripts (`lab replay`) is the check for that.
+
+`make eval-check` runs the grader's adversarial suite against every task, and `make eval` runs it first. For each task: the reference diff passes; an empty diff fails with exactly the `fail_to_pass` tests failing (so the task is valid); a diff that edits a hidden test path is rejected; a diff that adds a `conftest.py` forcing every test to pass is rejected; the hardcoded diff fails; and a run that collects zero tests fails. A grader VM takes under a second with a warm image cache, and the whole suite (60 grades, 40 of them in VMs, 4 at a time) about 9 s.
+
+**Report.** Each trial is appended to `evals/results/<date>.jsonl` (task, harness, model, verdict, input, output and cache tokens, cost, pricing date, wall time, tool calls, infra errors, session id), and `evals/results/<date>.md` is rebuilt from the whole day's file: a per-task table of solved trials per harness and model; the solve rate as the mean of per-task rates with a 95% interval from a two-stage bootstrap over tasks and then trials (10,000 resamples; a pooled interval would treat repeats of one task as independent and be too narrow); pass@3 and pass^3; the paired per-task difference between every two harnesses with its bootstrap interval; median and p95 tokens; USD per solved task (all spend, failed trials included, divided by solved trials); p50 and p95 wall time, which includes VM creation and model latency; and every trial with its session id. `lab replay <session>` prints a trial's whole log, tool results and the saved diff unclipped, for reviewing failed trials and checking passed ones for reward hacking.
+
+First run, 2026-11-17 ([report](evals/results/2026-11-17.md)): `deepagents_ollama` on Gemma 4 (`gemma4:26b-a4b-it-mtp-q4_K_M`), 3 trials per task, solved 28 of 30 trials (solve rate 93%, 95% interval 80% to 100%; pass@3 100%, pass^3 80%), with a median of 165 s and 63k tokens per trial. Two runs hit the 900 s run limit; one of them had already fixed the code and passes, because the grader judges the diff, not how the run ended. `claude_agent` and `claude_agent_local` have each run one trial through the eval so far (both solved `inventory-remove`).
+
 ## Requirements
 
 - Apple Silicon Mac, [uv](https://docs.astral.sh/uv/)
@@ -131,6 +168,9 @@ make test              # unit tests (need Postgres, use their own lab_test datab
 make test-integration  # end-to-end tests with real microVMs (need network; the slow agent tests and the claude_agent_local tests need Ollama, the claude_agent tests DEEPSEEK_API_KEY and spend a few DeepSeek tokens; skipped without them)
 make test-chaos        # kill -9 the API mid-run and restart it, per placement; prints recovery times (the host case needs Ollama)
 make claude-sdk        # install the Claude Agent SDK for the VMs into .cache/ (once; test-integration runs it)
+make grader-deps       # install pytest for the grader VMs into .cache/ (once; eval-check runs it)
+make eval-check        # the grader's adversarial suite against every task (real VMs, no model)
+make eval              # eval-check, then every task 3 times per harness; stop `make api` first
 make spike             # run the three spikes in order
 make check-names       # fail if a tracked file matches a pattern in the local .names-denylist
 ```
@@ -141,9 +181,18 @@ A chat from the command line, with `make api` running in another terminal:
 uv run lab new fixtures/calc-repo --harness deepagents_ollama   # prints the session id
 uv run lab tail <session_id>                                    # stream events (Ctrl-C to stop)
 uv run lab say <session_id> "One test fails. Fix the code."     # in a third terminal
+uv run lab replay <session_id>                                  # the whole log, nothing clipped
 ```
 
-The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `POST /sessions/{id}/harness {name}` (202), `POST /sessions/{id}/fork {at_seq}` (201), `DELETE /sessions/{id}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. A message, a switch or a close for a closed or failed session gets 409. Harnesses: `deepagents_ollama`, `claude_agent`, `claude_agent_local` and `scripted` (the default). `repo_url` is an `https://` git URL or a directory under `fixtures/`; other schemes are refused, because the clone runs on the host. None of the `deepagents_ollama` VM (no network), the `claude_agent` VM (DeepSeek only) and the `claude_agent_local` VM (no network, Ollama's Messages API over vsock) can install anything: the stock `python:3.13` image has no pytest, and a real repo's test dependencies are missing. The `calc-repo` fixture uses `unittest` for that reason.
+An eval run, on the local harnesses only (no DeepSeek spend), on two tasks, once each:
+
+```sh
+make eval EVAL_HARNESS=deepagents_ollama,claude_agent_local EVAL_TASKS=lru-recency,word-wrap EVAL_REPEATS=1
+```
+
+`EVAL_HARNESS` (default `deepagents_ollama,claude_agent`) takes any registered harnesses, `EVAL_TASKS` (default: all) task names, and `EVAL_REPEATS` (default 3) the trials per task and harness. The runner starts its own API process on a free port, against the database in `LAB_DATABASE_URL`, so `make api` must not run at the same time: both would reconcile the same open sessions. Every eval session is closed after its run, which destroys its VM. To review a trial afterwards, start `make api` and use `lab replay`.
+
+The API: `POST /sessions {repo_url, harness}`, `POST /sessions/{id}/messages {text, idem_key}` (202), `POST /sessions/{id}/harness {name}` (202), `POST /sessions/{id}/fork {at_seq}` (201), `DELETE /sessions/{id}` (202), `GET /sessions/{id}/events?after=N`, and `WS /sessions/{id}/stream?after=N`. A message, a switch or a close for a closed or failed session gets 409. Harnesses: `deepagents_ollama`, `claude_agent`, `claude_agent_local` and `scripted` (the default). `repo_url` is an `https://` git URL, a directory under `fixtures/` or an eval task's `environment/`; other schemes are refused, because the clone runs on the host. None of the `deepagents_ollama` VM (no network), the `claude_agent` VM (DeepSeek only) and the `claude_agent_local` VM (no network, Ollama's Messages API over vsock) can install anything: the stock `python:3.13` image has no pytest, and a real repo's test dependencies are missing. The `calc-repo` fixture uses `unittest` for that reason.
 
 ## Configuration
 
@@ -174,14 +223,17 @@ Read from the environment when the API starts (`src/lab/config.py`).
 | `migrations/` | SQL migrations, applied in file name order by `make migrate` |
 | `src/lab/` | The lab package: event store (`events.py`), live fan-out (`fanout.py`), sandbox manager (`sandbox.py`), per-session runner task and fork (`session.py`), state machines (`state.py`), startup reconciliation (`recovery.py`), API (`api.py`), CLI (`cli.py`), limits and model settings (`config.py`), DeepSeek prices (`pricing.py`, with the date they were checked) |
 | `src/lab/harnesses/` | Agent harnesses behind one interface (`base.py`), plus the registry: `deepagents_ollama.py` (placement A) and its VM backend `microsandbox_backend.py`, `claude_agent.py` (placement B), `claude_agent_local.py` (B-local, with the Ollama bridge), and `scripted.py` |
+| `src/lab/evals/` | The eval pipeline: task loader (`tasks.py`), grader and its rules (`grader.py`), the pytest entry point that runs inside the grader VM (`pytest_entry.py`), the adversarial suite (`check.py`), the runner (`run.py`), statistics (`stats.py`) and the Markdown report (`report.py`) |
 | `src/lab/runner/runner.py` | Copied into each VM; runs the in-VM agent (`scripted` or the Claude Agent SDK, plus the loopback-to-vsock relay for B-local), JSON task in, JSONL events out |
-| `tests/` | Unit tests, including Hypothesis properties of the state machines under crashes (`test_state_properties.py`) and the harness contract (`test_harness_contract.py`, with a fake `claude_agent_sdk` in `tests/fakes/`); `tests/integration/` runs real microVMs (and, marked `slow`, a real model through Ollama; marked `chaos`, kills of the API process; `test_claude_agent.py` uses DeepSeek, `test_claude_agent_local.py` the host's Ollama) |
+| `tests/` | Unit tests, including Hypothesis properties of the state machines under crashes (`test_state_properties.py`), the harness contract (`test_harness_contract.py`, with a fake `claude_agent_sdk` in `tests/fakes/`), the grader's rejection rules (`test_grader_rules.py`) and the eval statistics (`test_eval_stats.py`, the bootstrap against its closed-form variance); `tests/integration/` runs real microVMs (and, marked `slow`, a real model through Ollama; marked `chaos`, kills of the API process; `test_claude_agent.py` uses DeepSeek, `test_claude_agent_local.py` the host's Ollama) |
+| `evals/tasks/` | The eval tasks, one directory each (instruction, environment, hidden tests, reference and adversarial diffs) |
+| `evals/results/` | Eval results: one JSONL file and one Markdown report per day |
 | `fixtures/calc-repo/` | A tiny Python package with one failing test, used as a repo by the agent tests. Copied into VMs as a single-commit git repo |
 | `spikes/` | Throwaway experiments that answer one question each before the real code is written |
 | `spikes/out/` | Raw spike output (JSON and cached downloads). Gitignored |
 | `docs/spike-results.md` | Curated spike numbers and the decisions they drove, plus the measured crash recovery times |
 | `scripts/check_names.sh` | Name check used by `make check-names` |
-| `.cache/` | The Claude Agent SDK for Linux arm64, installed by `make claude-sdk` and mounted into `claude_agent` and `claude_agent_local` VMs. Gitignored |
+| `.cache/` | The Claude Agent SDK for Linux arm64, installed by `make claude-sdk` and mounted into `claude_agent` and `claude_agent_local` VMs, and pytest for the grader VMs (`make grader-deps`). Gitignored |
 | `.names-denylist` | Local regex list for the name check. Gitignored, never committed |
 | `~/.microsandbox/` | Outside the repo: microsandbox's image cache, sandbox database and CA. Created by the SDK. While the API runs it also holds `lab-ollama.sock`, the Ollama bridge's socket |
 

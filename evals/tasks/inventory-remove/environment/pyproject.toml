@@ -1,0 +1,5 @@
+[project]
+name = "stock"
+version = "0.1.0"
+description = "Track item quantities in a stock."
+requires-python = ">=3.11"

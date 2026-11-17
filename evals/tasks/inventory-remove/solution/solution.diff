@@ -1,0 +1,21 @@
+diff --git a/stock/__init__.py b/stock/__init__.py
+index d0a3e93..b04a56c 100644
+--- a/stock/__init__.py
++++ b/stock/__init__.py
+@@ -17,3 +17,16 @@ class Inventory:
+     def skus(self) -> list[str]:
+         """The SKUs in stock, sorted."""
+         return sorted(self._counts)
++
++    def remove(self, sku: str, quantity: int) -> int:
++        """Remove `quantity` items of `sku`; returns how many are left."""
++        if quantity <= 0:
++            raise ValueError("quantity must be positive")
++        left = self.count(sku) - quantity
++        if left < 0:
++            raise ValueError(f"only {self.count(sku)} of {sku} in stock")
++        if left:
++            self._counts[sku] = left
++        else:
++            self._counts.pop(sku, None)
++        return left

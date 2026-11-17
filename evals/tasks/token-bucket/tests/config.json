@@ -1,0 +1,12 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_never_more_than_capacity",
+    "tests/test_hidden.py::test_steady_rate_after_a_burst"
+  ],
+  "pass_to_pass": [
+    "tests/test_hidden.py::test_fractional_rate",
+    "tests/test_hidden.py::test_refused_request_takes_nothing",
+    "tests/test_throttle.py::TokenBucketTest::test_burst_up_to_capacity",
+    "tests/test_throttle.py::TokenBucketTest::test_cost_larger_than_capacity_is_refused"
+  ]
+}

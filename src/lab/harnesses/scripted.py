@@ -19,6 +19,7 @@ class ScriptedHarness:
     name = "scripted"
     placement: Literal["host", "sandbox"] = "sandbox"
     capabilities = frozenset({"streaming", "tool_use"})
+    model = "scripted"  # no model: a fixed script
 
     def vm_spec(self) -> VmSpec:
         return VmSpec()  # the default public network: the runner `pip install`s pytest

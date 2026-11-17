@@ -1,0 +1,14 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_arguments_are_not_modified",
+    "tests/test_hidden.py::test_nested_merge",
+    "tests/test_hidden.py::test_result_shares_no_dict_with_the_arguments",
+    "tests/test_hidden.py::test_three_levels"
+  ],
+  "pass_to_pass": [
+    "tests/test_confmerge.py::MergeTest::test_flat_override",
+    "tests/test_confmerge.py::MergeTest::test_new_keys_are_added",
+    "tests/test_hidden.py::test_dict_and_scalar_replace_each_other",
+    "tests/test_hidden.py::test_lists_are_replaced"
+  ]
+}

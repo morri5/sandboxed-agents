@@ -1,0 +1,5 @@
+[project]
+name = "csvstats"
+version = "0.1.0"
+description = "Summary statistics for CSV columns."
+requires-python = ">=3.11"

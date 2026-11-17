@@ -1,0 +1,19 @@
+diff --git a/timefmt/__init__.py b/timefmt/__init__.py
+index 665e644..d03b7e4 100644
+--- a/timefmt/__init__.py
++++ b/timefmt/__init__.py
+@@ -15,3 +15,14 @@ def format_duration(seconds: int) -> str:
+         if count:
+             parts.append(f"{count}{unit}")
+     return " ".join(parts)
++
++
++def parse_duration(text: str) -> int:
++    """The inverse of `format_duration`: "1h 30m" -> 5400. Raises ValueError on bad input."""
++    import re
++
++    pattern = r"\s*" + "".join(rf"(?:(\d+){unit}\s*)?" for unit, _ in UNITS)
++    match = re.fullmatch(pattern, text, flags=re.ASCII)
++    if not match or not any(match.groups()):
++        raise ValueError(f"not a duration: {text!r}")
++    return sum(int(count) * size for count, (_, size) in zip(match.groups(), UNITS) if count)

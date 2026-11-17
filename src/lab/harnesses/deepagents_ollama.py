@@ -51,16 +51,17 @@ class DeepAgentsOllamaHarness:
     name = "deepagents_ollama"
     placement: Literal["host", "sandbox"] = "host"
     capabilities = frozenset({"streaming", "tool_use"})
+    model = config.OLLAMA_MODEL
 
     def __init__(
         self, model: BaseChatModel | None = None, max_tool_calls: int = config.MAX_TOOL_CALLS
     ) -> None:
-        self.model = model
+        self.chat_model = model  # a fake for tests; None means Ollama
         self.max_tool_calls = max_tool_calls
 
     def _model(self) -> BaseChatModel:
-        if self.model is not None:
-            return self.model
+        if self.chat_model is not None:
+            return self.chat_model
         return ChatOllama(
             model=config.OLLAMA_MODEL, base_url=config.OLLAMA_URL, num_ctx=config.OLLAMA_NUM_CTX
         )

@@ -1,0 +1,19 @@
+diff --git a/throttle/__init__.py b/throttle/__init__.py
+index 9bfd956..8021b32 100644
+--- a/throttle/__init__.py
++++ b/throttle/__init__.py
+@@ -14,10 +14,12 @@ class TokenBucket:
+         self.capacity = capacity
+         self.clock = clock
+         self.tokens = capacity
+-        self.started = clock()
++        self.last = clock()
+ 
+     def _refill(self) -> None:
+-        self.tokens += (self.clock() - self.started) * self.rate
++        now = self.clock()
++        self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
++        self.last = now
+ 
+     def allow(self, cost: float = 1) -> bool:
+         """Take `cost` tokens if there are enough; True if the request may go ahead."""

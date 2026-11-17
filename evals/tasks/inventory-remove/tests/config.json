@@ -1,0 +1,15 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_quantity_must_be_positive[-1]",
+    "tests/test_hidden.py::test_quantity_must_be_positive[0]",
+    "tests/test_hidden.py::test_remove_returns_what_is_left",
+    "tests/test_hidden.py::test_removing_everything_drops_the_sku",
+    "tests/test_hidden.py::test_removing_too_many_changes_nothing",
+    "tests/test_hidden.py::test_unknown_sku"
+  ],
+  "pass_to_pass": [
+    "tests/test_hidden.py::test_add_still_validates",
+    "tests/test_stock.py::InventoryTest::test_add_and_count",
+    "tests/test_stock.py::InventoryTest::test_skus_sorted"
+  ]
+}

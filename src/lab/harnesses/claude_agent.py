@@ -51,6 +51,7 @@ class ClaudeAgentHarness:
     name = "claude_agent"
     placement: Literal["host", "sandbox"] = "sandbox"
     capabilities = frozenset({"streaming", "tool_use", "native_resume", "cost_report", "budget"})
+    model = config.DEEPSEEK_MODEL
 
     def vm_spec(self) -> VmSpec:
         key = os.environ.get("DEEPSEEK_API_KEY")

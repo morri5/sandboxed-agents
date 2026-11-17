@@ -1,0 +1,15 @@
+{
+  "fail_to_pass": [
+    "tests/test_hidden.py::test_contained_interval_unsorted",
+    "tests/test_hidden.py::test_total_length_with_unsorted_overlaps",
+    "tests/test_hidden.py::test_touching_intervals_merge",
+    "tests/test_hidden.py::test_unsorted_input"
+  ],
+  "pass_to_pass": [
+    "tests/test_hidden.py::test_input_is_not_modified",
+    "tests/test_hidden.py::test_single_interval",
+    "tests/test_intervals.py::MergeTest::test_empty",
+    "tests/test_intervals.py::MergeTest::test_overlapping_sorted_input",
+    "tests/test_intervals.py::MergeTest::test_total_length_of_disjoint_intervals"
+  ]
+}

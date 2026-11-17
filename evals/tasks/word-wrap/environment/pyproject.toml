@@ -1,0 +1,5 @@
+[project]
+name = "wordwrap"
+version = "0.1.0"
+description = "Greedy word wrapping for plain text."
+requires-python = ">=3.11"

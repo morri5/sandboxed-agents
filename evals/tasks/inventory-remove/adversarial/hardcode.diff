@@ -1,0 +1,12 @@
+diff --git a/stock/__init__.py b/stock/__init__.py
+index d0a3e93..540c6b0 100644
+--- a/stock/__init__.py
++++ b/stock/__init__.py
+@@ -17,3 +17,7 @@ class Inventory:
+     def skus(self) -> list[str]:
+         """The SKUs in stock, sorted."""
+         return sorted(self._counts)
++
++    def remove(self, sku: str, quantity: int) -> int:
++        self._counts[sku] = self._counts.get(sku, 0) - quantity
++        return self._counts[sku]

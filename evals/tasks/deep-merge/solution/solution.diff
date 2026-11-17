@@ -1,0 +1,22 @@
+diff --git a/confmerge/__init__.py b/confmerge/__init__.py
+index bf141fc..ba3ae94 100644
+--- a/confmerge/__init__.py
++++ b/confmerge/__init__.py
+@@ -1,10 +1,15 @@
+ """Merge configuration dictionaries, such as defaults with user settings."""
+ 
++import copy
+ from typing import Any
+ 
+ 
+ def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+     """`base` with the values of `override` on top."""
+-    result = base
+-    result.update(override)
++    result = copy.deepcopy(base)
++    for key, value in override.items():
++        if isinstance(result.get(key), dict) and isinstance(value, dict):
++            result[key] = merge(result[key], value)
++        else:
++            result[key] = copy.deepcopy(value)
+     return result

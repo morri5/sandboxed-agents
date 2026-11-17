@@ -1,0 +1,31 @@
+diff --git a/wordwrap/__init__.py b/wordwrap/__init__.py
+index 0a7cd62..1f5d09a 100644
+--- a/wordwrap/__init__.py
++++ b/wordwrap/__init__.py
+@@ -3,16 +3,21 @@
+ 
+ def wrap(text: str, width: int) -> list[str]:
+     """Split `text` into lines of at most `width` characters, breaking at spaces."""
++    if width < 1:
++        raise ValueError("width must be at least 1")
++    pieces = [
++        word[i : i + width] for word in text.split() for i in range(0, len(word), width)
++    ]
+     lines: list[str] = []
+     current = ""
+-    for word in text.split():
++    for piece in pieces:
+         if not current:
+-            current = word
+-        elif len(current) + len(word) + 1 <= width + 1:
+-            current += " " + word
++            current = piece
++        elif len(current) + len(piece) + 1 <= width:
++            current += " " + piece
+         else:
+             lines.append(current)
+-            current = word
++            current = piece
+     if current:
+         lines.append(current)
+     return lines

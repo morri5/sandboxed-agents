@@ -1,0 +1,28 @@
+diff --git a/csvstats/__init__.py b/csvstats/__init__.py
+index abb6255..e33438f 100644
+--- a/csvstats/__init__.py
++++ b/csvstats/__init__.py
+@@ -8,16 +8,18 @@ def read_rows(text: str) -> list[dict[str, str]]:
+     return list(csv.DictReader(io.StringIO(text)))
+ 
+ 
+-def _number(cell: str) -> float:
+-    return float(cell) if cell else 0.0
++def _values(rows: list[dict[str, str]], column: str) -> list[float]:
++    """The numbers in `column`; empty or blank cells are missing and skipped."""
++    return [float(row[column]) for row in rows if row[column] and row[column].strip()]
+ 
+ 
+ def column_mean(rows: list[dict[str, str]], column: str) -> float | None:
+     """The mean of the numeric values in `column`."""
+-    values = [_number(row[column]) for row in rows]
+-    return sum(values) / len(values)
++    values = _values(rows, column)
++    return sum(values) / len(values) if values else None
+ 
+ 
+ def column_max(rows: list[dict[str, str]], column: str) -> float | None:
+     """The largest numeric value in `column`."""
+-    return max(_number(row[column]) for row in rows)
++    values = _values(rows, column)
++    return max(values) if values else None
