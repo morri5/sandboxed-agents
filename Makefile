@@ -1,5 +1,5 @@
 .PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk \
-	grader-deps eval-check eval
+	grader-deps eval-check eval web-test
 
 PY_SOURCES := spikes src tests scripts
 
@@ -61,3 +61,8 @@ EVAL_TASKS ?=
 eval: migrate claude-sdk eval-check
 	uv run python -m lab.evals.run --harness $(EVAL_HARNESS) --repeats $(EVAL_REPEATS) \
 		$(if $(EVAL_TASKS),--tasks '$(EVAL_TASKS)')
+
+# Playwright: two tabs on one session (scripted harness, real VM). Starts its own API on
+# port 8765 with the lab_test database, and the page on port 3100.
+web-test: db-up
+	npm --prefix web run test:e2e
