@@ -1,5 +1,5 @@
 .PHONY: lint test test-integration test-chaos spike check-names db-up migrate api claude-sdk \
-	grader-deps eval-check eval web-test
+	grader-deps eval-check eval web-test demo
 
 PY_SOURCES := spikes src tests scripts
 
@@ -39,6 +39,12 @@ migrate: db-up
 
 api: migrate
 	uv run uvicorn lab.api:app
+
+# One chat on fixtures/calc-repo, streamed to the terminal, then closed. Starts its own API
+# on a free port: stop `make api` first. DEMO_HARNESS=deepagents_ollama needs Ollama.
+DEMO_HARNESS ?= scripted
+demo: migrate
+	uv run python scripts/demo.py $(DEMO_HARNESS)
 
 # The Claude Agent SDK (and its CLI) for Linux arm64, mounted into claude_agent VMs.
 claude-sdk:
