@@ -17,7 +17,8 @@ A first run starts straight from `created` (the VM is provisioned inside the run
 
 from dataclasses import dataclass, field
 
-from lab.events import Event, Message
+from lab import config
+from lab.events import Event, Limits, Message
 
 RUN_ENDS = {"run_finished": "finished", "run_failed": "failed", "run_interrupted": "interrupted"}
 OPEN = ("created", "ready", "idle")  # session states that accept a message, a fork or a close
@@ -70,6 +71,10 @@ class SessionState:
     commit: str | None = None  # the commit an https clone was taken at (None for a fixture)
     workspace: str | None = None  # last saved workspace patch, base64 (see `workspace_saved`)
     message_seq: int | None = None  # the last user message
+    # Options of the last user message: run it without the earlier conversation (and
+    # without a native resume), and with these limits instead of `config`'s.
+    fresh_context: bool = False
+    limits: Limits | None = None
     attempts: int = 0  # runs started for the last user message
     answered: bool = False  # the last user message got an `agent_message`
     run_id: str | None = None  # the last run started
@@ -79,6 +84,11 @@ class SessionState:
     resume: str | None = None
     last_seq: int = 0
     transcript: list[Message] = field(default_factory=list)
+
+    @property
+    def run_timeout_s(self) -> int:
+        """Wall-time limit of a run for the last user message."""
+        return (self.limits and self.limits.run_timeout_s) or config.RUN_TIMEOUT_S
 
 
 def fold(events: list[Event]) -> SessionState:
@@ -104,6 +114,8 @@ def fold(events: list[Event]) -> SessionState:
             case "user_message":
                 state.transcript.append(Message("user", p["text"]))
                 state.message_seq = event.seq
+                state.fresh_context = p.get("fresh_context", False)
+                state.limits = Limits(**p["limits"]) if p.get("limits") else None
                 state.attempts = 0
                 state.answered = False
             case "agent_message":

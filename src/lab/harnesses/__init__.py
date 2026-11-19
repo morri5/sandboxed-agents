@@ -3,6 +3,7 @@
 from lab.harnesses.base import Harness
 from lab.harnesses.claude_agent import ClaudeAgentHarness
 from lab.harnesses.claude_agent_local import BRIDGE, ClaudeAgentLocalHarness
+from lab.harnesses.claude_factory import ClaudeFactoryHarness
 from lab.harnesses.deepagents_ollama import DeepAgentsOllamaHarness
 from lab.harnesses.scripted import ScriptedHarness
 
@@ -13,6 +14,7 @@ HARNESSES: dict[str, Harness] = {
         DeepAgentsOllamaHarness(),
         ClaudeAgentHarness(),
         ClaudeAgentLocalHarness(),
+        ClaudeFactoryHarness(),
     )
 }
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from lab import events
 from lab.db import DATABASE_URL, create_pool
+from lab.events import Limits
 from lab.fanout import FanOut
 from lab.harnesses import HARNESSES, start_host_services, stop_host_services
 from lab.session import SessionRunner, fork_session
@@ -28,6 +29,8 @@ class NewSession(BaseModel):
 class NewMessage(BaseModel):
     text: str
     idem_key: str
+    fresh_context: bool = False  # run without the earlier conversation (same VM and tree)
+    limits: Limits | None = None  # overrides of the configured run limits, bounded
 
 
 class Fork(BaseModel):
@@ -104,7 +107,7 @@ async def _open_runner(request: Request, session_id: UUID) -> SessionRunner:
 @app.post("/sessions/{session_id}/messages", status_code=202)
 async def send_message(session_id: UUID, body: NewMessage, request: Request) -> dict[str, Any]:
     runner = await _open_runner(request, session_id)
-    runner.submit(body.text, body.idem_key)
+    runner.submit(body.text, body.idem_key, body.fresh_context, body.limits)
     return {"accepted": True, "idem_key": body.idem_key}
 
 

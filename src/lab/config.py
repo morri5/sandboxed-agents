@@ -1,6 +1,7 @@
 """Limits and model settings, read from the environment once at import."""
 
 import os
+from pathlib import Path
 
 
 def _int(name: str, default: int) -> int:
@@ -28,3 +29,7 @@ SCRIPTED_STEP_DELAY_S = _int("LAB_SCRIPTED_STEP_DELAY_S", 0)
 DEEPSEEK_MODEL = os.environ.get("LAB_DEEPSEEK_MODEL", "deepseek-flash")
 # Spend limit of one `claude_agent` run, from token usage and `pricing.py`: reason "budget".
 MAX_USD_PER_RUN = float(os.environ.get("LAB_MAX_USD_PER_RUN", "0.50"))
+
+# Subagents of the `claude_factory` harness: every `*.md` here (Claude Code agent files,
+# frontmatter plus prompt) becomes one. Read on every run, never mounted into the VM.
+FACTORY_AGENTS_DIR = Path(os.environ.get("LAB_FACTORY_AGENTS_DIR", "~/.claude/agents")).expanduser()

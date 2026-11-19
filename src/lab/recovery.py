@@ -23,7 +23,7 @@ from uuid import UUID
 import asyncpg
 from microsandbox import MicrosandboxError
 
-from lab import config, events, sandbox
+from lab import events, sandbox
 from lab.events import TERMINAL_RUN_EVENTS, AgentEvent, Event
 from lab.harnesses import HARNESSES
 from lab.state import OPEN, SessionState, fold
@@ -107,7 +107,7 @@ async def reconcile(pool: asyncpg.Pool, session_id: UUID) -> None:
             if job is not None:
                 after = ingested_rseq(await events.read(pool, session_id), run_id)
                 try:
-                    async with asyncio.timeout(config.RUN_TIMEOUT_S):
+                    async with asyncio.timeout(state.run_timeout_s):
                         terminal = await ingest(pool, session_id, sandbox.job_events(job), after)
                 except TimeoutError:
                     with contextlib.suppress(MicrosandboxError):
@@ -118,7 +118,7 @@ async def reconcile(pool: asyncpg.Pool, session_id: UUID) -> None:
                         "run_failed",
                         run_id=run_id,
                         reason="timeout",
-                        limit_s=config.RUN_TIMEOUT_S,
+                        limit_s=state.run_timeout_s,
                     )
                     return
     if not terminal:

@@ -13,6 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import asyncpg
+from pydantic import BaseModel, Field
 
 CHANNEL = "events"
 TERMINAL_RUN_EVENTS = frozenset({"run_finished", "run_failed", "run_interrupted"})
@@ -46,6 +47,18 @@ class Event:
 class Message:
     role: Literal["user", "assistant"]
     text: str
+
+
+class Limits(BaseModel):
+    """Per-message overrides of the run limits in `config` (None keeps the default).
+
+    `run_timeout_s` applies to every harness (the session layer enforces it); the
+    others only to a harness with the `limits` capability.
+    """
+
+    max_tool_calls: int | None = Field(default=None, ge=1, le=1000)
+    run_timeout_s: int | None = Field(default=None, ge=1, le=7200)
+    max_usd: float | None = Field(default=None, gt=0, le=20)
 
 
 @dataclass(frozen=True)

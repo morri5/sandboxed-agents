@@ -16,17 +16,18 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import asyncpg
 from microsandbox import Sandbox
 
-from lab import config, events, recovery, sandbox
-from lab.events import TERMINAL_RUN_EVENTS
+from lab import events, recovery, sandbox
+from lab.events import TERMINAL_RUN_EVENTS, AgentEvent, Limits
 from lab.fanout import FanOut
 from lab.harnesses import HARNESSES
-from lab.harnesses.base import Harness
+from lab.harnesses.base import Harness, LimitedHarness
 from lab.state import OPEN, SessionState, fold
 
 log = logging.getLogger(__name__)
@@ -37,12 +38,21 @@ class SessionRunner:
         self.pool = pool
         self.fanout = fanout
         self.session_id = session_id
-        # ("message", text, idem_key), ("harness", name), or None to close
-        self.queue: asyncio.Queue[tuple[str, ...] | None] = asyncio.Queue()
+        # ("message", user_message payload, idem_key), ("harness", name), or None to close
+        self.queue: asyncio.Queue[tuple[Any, ...] | None] = asyncio.Queue()
         self.task = asyncio.create_task(self._loop(), name=f"session-{session_id}")
 
-    def submit(self, text: str, idem_key: str) -> None:
-        self.queue.put_nowait(("message", text, idem_key))
+    def submit(
+        self, text: str, idem_key: str, fresh_context: bool = False, limits: Limits | None = None
+    ) -> None:
+        """Queue a message. Its options go into the `user_message` payload (only when
+        set), so a re-run after recovery applies them too."""
+        payload: dict[str, Any] = {"text": text}
+        if fresh_context:
+            payload["fresh_context"] = True
+        if limits is not None:
+            payload["limits"] = limits.model_dump(exclude_none=True)
+        self.queue.put_nowait(("message", payload, idem_key))
 
     def switch_harness(self, name: str) -> None:
         self.queue.put_nowait(("harness", name))
@@ -69,8 +79,8 @@ class SessionRunner:
                     case None:
                         await self._close()
                         return
-                    case ("message", text, idem_key):
-                        await self._handle(text, idem_key)
+                    case ("message", payload, idem_key):
+                        await self._handle(payload, idem_key)
                     case ("harness", name):
                         await self._switch(name)
             except Exception:
@@ -98,12 +108,12 @@ class SessionRunner:
         if recovery.needs_run(state):  # a saved workspace does not change the answer
             await self._run()
 
-    async def _handle(self, text: str, idem_key: str) -> None:
+    async def _handle(self, payload: dict[str, Any], idem_key: str) -> None:
         state = await self._state()
         if state.session not in OPEN:
             log.warning("session %s is %s: message dropped", self.session_id, state.session)
             return
-        seq = await self._append("user_message", {"text": text}, idem_key)
+        seq = await self._append("user_message", payload, idem_key)
         if seq <= state.last_seq:
             return  # a retry of a message that is already in the log
         await self._run()
@@ -116,7 +126,11 @@ class SessionRunner:
         await self._append("harness_switched", {"from": state.harness, "to": name})
 
     async def _run(self) -> None:
-        """Run the harness on the transcript, which ends with the last user message."""
+        """Run the harness on the transcript, which ends with the last user message.
+
+        With `fresh_context` the transcript is that message alone, and the harness
+        does not resume its own session either.
+        """
         state = await self._state()
         assert state.harness is not None
         harness = HARNESSES[state.harness]
@@ -125,14 +139,14 @@ class SessionRunner:
         await self._append("run_started", payload)
         terminal = False
         sb: Sandbox | None = None
-        deadline = asyncio.timeout(config.RUN_TIMEOUT_S)
+        deadline = asyncio.timeout(state.run_timeout_s)
         try:
             async with deadline:
                 sb, same_vm = await self._sandbox(state, harness)
                 # The harness may continue its own session only in the VM that holds it.
                 native = "native_resume" in harness.capabilities and same_vm
-                resume = state.resume if native else None
-                async for ev in harness.run(state.transcript, sb, run_id, resume):
+                resume = state.resume if native and not state.fresh_context else None
+                async for ev in self._events(harness, state, sb, run_id, resume):
                     if ev.rseq is None:
                         self.fanout.publish_delta(self.session_id, {"type": ev.type, **ev.payload})
                         continue
@@ -146,7 +160,7 @@ class SessionRunner:
                 log.exception("session %s: run %s failed", self.session_id, run_id)
             if not terminal:
                 failure = (
-                    {"reason": "timeout", "limit_s": config.RUN_TIMEOUT_S}
+                    {"reason": "timeout", "limit_s": state.run_timeout_s}
                     if timed_out
                     else {"reason": "error", "error": repr(exc)}
                 )
@@ -156,6 +170,15 @@ class SessionRunner:
                 await self._append("session_failed", {"reason": "provisioning", "error": repr(exc)})
         if sb is not None:  # also after a failed run: its edits are in the VM all the same
             await self._save_workspace(sb, state)
+
+    def _events(
+        self, harness: Harness, state: SessionState, sb: Sandbox, run_id: str, resume: str | None
+    ) -> AsyncIterator[AgentEvent]:
+        transcript = state.transcript[-1:] if state.fresh_context else state.transcript
+        if "limits" in harness.capabilities:
+            limited = cast(LimitedHarness, harness)
+            return limited.run(transcript, sb, run_id, resume, limits=state.limits)
+        return harness.run(transcript, sb, run_id, resume)
 
     async def _sandbox(self, state: SessionState, harness: Harness) -> tuple[Sandbox, bool]:
         """The session's VM, and whether it is the one the last run used.

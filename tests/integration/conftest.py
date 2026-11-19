@@ -164,11 +164,12 @@ def _run_ended(log: list[dict[str, Any]], text: str) -> bool:
 
 
 async def say_and_wait(
-    api: str, session_id: str, text: str, timeout: float = 600
+    api: str, session_id: str, text: str, timeout: float = 600, **options: Any
 ) -> list[dict[str, Any]]:
-    """Send a message; return the log once its run ended and the log is quiet (the
-    workspace snapshot after a run may add one more event)."""
-    body = {"text": text, "idem_key": str(uuid.uuid4())}
+    """Send a message (with `options` such as `fresh_context`); return the log once its
+    run ended and the log is quiet (the workspace snapshot after a run may add one
+    more event)."""
+    body = {"text": text, "idem_key": str(uuid.uuid4()), **options}
     assert httpx.post(f"{api}/sessions/{session_id}/messages", json=body).status_code == 202
     previous = None
     async with asyncio.timeout(timeout):

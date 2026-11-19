@@ -6,7 +6,8 @@ The file is what survives if the API that reads stdout dies. Live `agent_delta`
 tokens go to stdout only.
 
 Agents: `scripted`, a deterministic fake, and the Claude Agent SDK, with DeepSeek
-(`claude_agent`) or the host's Ollama (`claude_agent_local`) as the brain. Standard
+(`claude_agent`, and `claude_factory` with subagents) or the host's Ollama
+(`claude_agent_local`) as the brain. Standard
 library only, apart from the SDK, which only those VMs have (mounted read-only, see
 `harnesses/claude_agent.py`).
 """
@@ -132,6 +133,10 @@ CLAUDE_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 # Subagents would hide their tool calls inside one result; the web tools cannot
 # work behind a network policy that only allows the model API.
 CLAUDE_DISALLOWED = ["Task", "Agent", "WebFetch", "WebSearch"]
+# `claude_factory` runs commands that delegate to subagents: their tool calls are
+# recorded and counted like the main agent's, with `parent` set to the `Agent` call.
+FACTORY_TOOLS = [*CLAUDE_TOOLS, "Agent"]
+FACTORY_DISALLOWED = ["WebFetch", "WebSearch"]
 
 
 def claude_prompt(transcript: list[dict[str, str]], resume: str | None) -> str:
@@ -145,6 +150,47 @@ def claude_prompt(transcript: list[dict[str, str]], resume: str | None) -> str:
         "The conversation so far, rebuilt from the session log:\n\n"
         f"<conversation>\n{earlier}\n</conversation>\n\nThe user's new message:\n\n{last}"
     )
+
+
+class SubagentUsage:
+    """Usage per model call of a session's subagents, read from the CLI's transcripts
+    (`~/.claude/projects/*/<session>/subagents/*.jsonl`).
+
+    Neither the result's usage nor the stream events include subagent calls, and the
+    subagents' messages that reach the SDK carry no output tokens and miss each
+    subagent's last call (all measured), so the transcripts are the source. A call is
+    logged once per content block, so it is kept per message id. Files are read
+    incrementally: only complete lines past the last read.
+    """
+
+    def __init__(self) -> None:
+        self.calls: dict[str, dict[str, int]] = {}
+        self.offsets: dict[Path, int] = {}
+
+    def update(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        for path in Path.home().glob(f".claude/projects/*/{session_id}/subagents/*.jsonl"):
+            with path.open("rb") as f:
+                f.seek(self.offsets.get(path, 0))
+                data = f.read()
+            complete = data[: data.rfind(b"\n") + 1]  # a last line may still be written
+            self.offsets[path] = self.offsets.get(path, 0) + len(complete)
+            for line in complete.splitlines():
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") or {}
+                usage = message.get("usage")
+                if entry.get("type") != "assistant" or not isinstance(usage, dict):
+                    continue
+                key = f"{path.name}:{message.get('id') or entry.get('uuid')}"
+                seen = self.calls.get(key, {})
+                self.calls[key] = {k: max(seen.get(k, 0), usage.get(k) or 0) for k in USAGE_KEYS}
+
+    def usd(self, price: dict[str, float]) -> float:
+        return sum(usd(u, price) for u in self.calls.values())
 
 
 HOST_CID = 2  # the host, as seen over vsock
@@ -198,8 +244,14 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     `run_failed{reason: "max_tool_calls"}` (a turn can ask for several calls, so
     the SDK's `max_turns` alone would allow more). With `vsock_port` the brain is the
     host's Ollama, reached through `vsock_relay`.
+
+    For `claude_factory` the `Agent` tool is allowed with the task's subagents (in the
+    foreground), no settings are loaded (`setting_sources=[]`), every model alias maps
+    to the task's model, tool calls carry `parent`, and `run_finished` carries
+    `agents_sha`; subagents' model usage is added to the usage, cost and budget.
     """
     from claude_agent_sdk import (  # only claude_agent VMs have the SDK
+        AgentDefinition,
         AssistantMessage,
         ClaudeAgentOptions,
         ClaudeSDKClient,
@@ -214,35 +266,59 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     env = {"ANTHROPIC_DEFAULT_HAIKU_MODEL": model}  # background calls never ask for Claude
     if task.get("vsock_port"):
         env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{vsock_relay(task['vsock_port'])}"
+    factory = task["harness"] == "claude_factory"
+    tools, disallowed = CLAUDE_TOOLS, CLAUDE_DISALLOWED
+    extra: dict[str, Any] = {}
+    if factory:
+        # Subagent files ask for `sonnet` or `opus`: those resolve to the task's model too.
+        env |= {"ANTHROPIC_DEFAULT_SONNET_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model}
+        # Background subagents would outlive the turn: `receive_response` ends at the
+        # first result while they still run (measured), so the command never finishes.
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        tools, disallowed = FACTORY_TOOLS, FACTORY_DISALLOWED
+        extra = {
+            "setting_sources": [],  # the repo's settings could run hooks: load none
+            "agents": {name: AgentDefinition(**d) for name, d in task["agents"].items()},
+        }
     options = ClaudeAgentOptions(
         cwd=os.getcwd(),
         model=model,
         system_prompt={"type": "preset", "preset": "claude_code", "append": task["system_prompt"]},
-        allowed_tools=CLAUDE_TOOLS,
-        disallowed_tools=CLAUDE_DISALLOWED,
+        allowed_tools=tools,
+        disallowed_tools=disallowed,
         permission_mode="dontAsk",  # the VM is the boundary; anything not allowed is denied
         max_turns=task["max_tool_calls"],  # backstop; the call count below binds first
         resume=task.get("resume"),
         include_partial_messages=True,
         env=env,
+        **extra,
     )
     spent, over_budget, result = 0.0, False, None
     calls, over_calls = 0, False
     names: dict[str, str] = {}
+    subagents = SubagentUsage()  # stays empty unless subagents ran
+    session_id: str | None = None
+
     async with ClaudeSDKClient(options) as client:
         await client.query(claude_prompt(task["transcript"], task.get("resume")))
         async for msg in client.receive_response():
             if isinstance(msg, StreamEvent):
+                session_id = msg.session_id
                 event = msg.event
                 delta = event.get("delta") or {}
                 if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
                     emit.delta(delta["text"])
                 elif event.get("type") == "message_delta" and not over_budget:
                     spent += usd(event.get("usage") or {}, price)
-                    if budget is not None and spent > budget:
+                    if budget is not None and spent + subagents.usd(price) > budget:
                         over_budget = True
                         await client.interrupt()
             elif isinstance(msg, AssistantMessage):
+                if factory and msg.parent_tool_use_id and budget is not None and not over_budget:
+                    subagents.update(session_id)
+                    if spent + subagents.usd(price) > budget:
+                        over_budget = True
+                        await client.interrupt()
                 uses = [b for b in msg.content if isinstance(b, ToolUseBlock)]
                 if uses and not over_calls and calls + len(uses) > task["max_tool_calls"]:
                     over_calls = True
@@ -252,6 +328,8 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
                         calls += 1
                         names[block.id] = block.name
                         payload = {"id": block.id, "name": block.name, "args": block.input}
+                        if factory:  # the `Agent` call a subagent's call belongs to
+                            payload["parent"] = msg.parent_tool_use_id
                         emit.event("tool_call", payload)
             elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
                 for block in msg.content:
@@ -273,7 +351,12 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
     if result is None:
         raise RuntimeError("the SDK ended without a result message")
     usage = {k: (result.usage or {}).get(k) or 0 for k in USAGE_KEYS}
-    cost = {"usage": usage, "cost_usd": round(max(spent, usd(usage, price)), 6)}
+    main_usd = max(spent, usd(usage, price))
+    if factory:
+        subagents.update(result.session_id)
+    for u in subagents.calls.values():
+        usage = {k: usage[k] + u[k] for k in USAGE_KEYS}
+    cost = {"usage": usage, "cost_usd": round(main_usd + subagents.usd(price), 6)}
     if over_budget:
         emit.event("run_failed", {"reason": "budget", "limit_usd": budget, **cost})
     elif over_calls or result.subtype == "error_max_turns":
@@ -284,17 +367,27 @@ async def _claude_agent(emit: Emitter, task: dict[str, Any]) -> dict[str, Any] |
         emit.event("run_failed", {"reason": "error", "error": str(error)[-2000:], **cost})
     else:
         emit.event("agent_message", {"text": result.result or ""})
-        return {
+        finished = {
             "model": model,
             "num_turns": result.num_turns,
             "resumed": bool(task.get("resume")),
             "resume": result.session_id,  # the SDK session, for a native resume next run
             **cost,
         }
+        if factory:
+            finished["agents_sha"] = task["agents_sha"]
+            finished["subagent_calls"] = len(subagents.calls)  # model calls, included above
+            finished["subagent_cost_usd"] = round(subagents.usd(price), 6)
+        return finished
     return None
 
 
-HARNESSES = {"scripted": scripted, "claude_agent": claude_agent, "claude_agent_local": claude_agent}
+HARNESSES = {
+    "scripted": scripted,
+    "claude_agent": claude_agent,
+    "claude_agent_local": claude_agent,
+    "claude_factory": claude_agent,
+}
 
 
 def main() -> None:

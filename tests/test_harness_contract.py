@@ -2,9 +2,10 @@
 or a model.
 
 `deepagents_ollama` runs its real loop with a fake chat model, and its tool calls
-go to a fake VM that answers every command. `claude_agent` and `claude_agent_local`
-run their real host side and the real `runner.py` (as a local process instead of
-a VM job) against a fake `claude_agent_sdk` (`tests/fakes/claude_agent_sdk.py`).
+go to a fake VM that answers every command. `claude_agent`, `claude_agent_local`
+and `claude_factory` run their real host side and the real `runner.py` (as a local
+process instead of a VM job) against a fake `claude_agent_sdk`
+(`tests/fakes/claude_agent_sdk.py`).
 """
 
 import asyncio
@@ -24,17 +25,37 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from microsandbox import Sandbox
 
 from lab import config, pricing
-from lab.events import TERMINAL_RUN_EVENTS, AgentEvent, Message
+from lab.events import TERMINAL_RUN_EVENTS, AgentEvent, Limits, Message
 from lab.harnesses import HARNESSES
-from lab.harnesses.base import CAPABILITIES, Harness
+from lab.harnesses.base import CAPABILITIES, Harness, LimitedHarness
 from lab.harnesses.claude_agent import ClaudeAgentHarness
 from lab.harnesses.claude_agent_local import ClaudeAgentLocalHarness
+from lab.harnesses.claude_factory import ClaudeFactoryHarness, load_agents
 from lab.harnesses.deepagents_ollama import DeepAgentsOllamaHarness
-from lab.sandbox import RUNNER_HOST
+from lab.sandbox import RUNNER_HOST, SandboxError
 from tests.fakes import claude_agent_sdk as fake_sdk
 
 TRANSCRIPT = [Message("user", "What is in this repo?")]
 RUN_ID = "run-1"
+AGENT_FILE = """---
+name: locator
+description: Finds files.
+tools: Grep, Glob
+model: sonnet
+---
+
+You find files.
+"""
+
+
+@pytest.fixture(autouse=True)
+def agents_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The subagent files `claude_factory` reads: one agent."""
+    directory = tmp_path / "agents"
+    directory.mkdir()
+    (directory / "locator.md").write_text(AGENT_FILE)
+    monkeypatch.setattr(config, "FACTORY_AGENTS_DIR", directory)
+    return directory
 
 
 class ScriptedModel(BaseChatModel):
@@ -118,7 +139,8 @@ class FakeVM:
             str(RUNNER_HOST),
             *args[1:],
             cwd=self.tmp,
-            env={**os.environ, "PYTHONPATH": str(self.sdk_dir)},
+            # HOME: where the fake SDK writes, and the runner reads, CLI transcripts.
+            env={**os.environ, "PYTHONPATH": str(self.sdk_dir), "HOME": str(self.tmp)},
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -133,15 +155,22 @@ def _harness(name: str) -> Harness:
         return DeepAgentsOllamaHarness(model=ScriptedModel())
     if name == "claude_agent_local":
         return ClaudeAgentLocalHarness()
+    if name == "claude_factory":
+        return ClaudeFactoryHarness()
     return ClaudeAgentHarness()
 
 
-async def _run(harness: Harness, tmp_path: Path) -> list[AgentEvent]:
+async def _run(harness: Harness, tmp_path: Path, limits: Limits | None = None) -> list[AgentEvent]:
     vm = cast(Sandbox, FakeVM(tmp_path))
+    if limits is not None:
+        limited = cast(LimitedHarness, harness)
+        return [ev async for ev in limited.run(TRANSCRIPT, vm, RUN_ID, limits=limits)]
     return [ev async for ev in harness.run(TRANSCRIPT, vm, RUN_ID)]
 
 
-@pytest.mark.parametrize("name", ["deepagents_ollama", "claude_agent", "claude_agent_local"])
+@pytest.mark.parametrize(
+    "name", ["deepagents_ollama", "claude_agent", "claude_agent_local", "claude_factory"]
+)
 async def test_harness_contract(name: str, tmp_path: Path) -> None:
     harness = _harness(name)
     assert harness.name == name and HARNESSES[name].name == name
@@ -172,7 +201,7 @@ async def test_harness_contract(name: str, tmp_path: Path) -> None:
 
     # Live tokens are deltas only, never durable.
     assert all(ev.type == "agent_delta" for ev in deltas)
-    if "streaming" in harness.capabilities and name.startswith("claude_agent"):
+    if "streaming" in harness.capabilities and name.startswith("claude_"):
         assert "".join(ev.payload["text"] for ev in deltas).endswith(fake_sdk.ANSWER)
 
     finished = durable[-1].payload
@@ -181,7 +210,9 @@ async def test_harness_contract(name: str, tmp_path: Path) -> None:
         free = name == "claude_agent_local"
         expected = 0.0 if free else pricing.cost_usd(config.DEEPSEEK_MODEL, finished["usage"])
         assert finished["cost_usd"] == pytest.approx(expected)
-        assert finished["usage"]["input_tokens"] == 40_200
+        # `claude_factory` adds the subagent's model call, once.
+        sub = fake_sdk.SUB_CALL["input_tokens"] if name == "claude_factory" else 0
+        assert finished["usage"]["input_tokens"] == 40_200 + sub
     if "native_resume" in harness.capabilities:
         assert finished["resume"] == "fake-session"
 
@@ -200,7 +231,9 @@ async def test_budget_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize(
-    "harness", [ClaudeAgentHarness(), ClaudeAgentLocalHarness()], ids=lambda h: h.name
+    "harness",
+    [ClaudeAgentHarness(), ClaudeAgentLocalHarness(), ClaudeFactoryHarness()],
+    ids=lambda h: h.name,
 )
 async def test_tool_call_cap_ends_the_run(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -214,3 +247,88 @@ async def test_tool_call_cap_ends_the_run(
     assert [ev.type for ev in durable] == ["run_failed"]
     assert durable[0].payload["reason"] == "max_tool_calls"
     assert durable[0].payload["limit"] == 0
+
+
+async def test_factory_options_and_subagent_calls(tmp_path: Path, agents_dir: Path) -> None:
+    """`claude_factory` loads no settings, allows the `Agent` tool with the agents from
+    the agent files, maps every model alias to DeepSeek, and records the subagent's
+    own tool call with its `parent`."""
+    durable = [ev for ev in await _run(ClaudeFactoryHarness(), tmp_path) if ev.rseq is not None]
+    options = json.loads((tmp_path / fake_sdk.OPTIONS_FILE).read_text())
+    assert options["setting_sources"] == []
+    assert "Agent" in options["allowed_tools"]
+    assert "Agent" not in options["disallowed_tools"]
+    assert options["agents"] == {
+        "locator": {
+            "description": "Finds files.",
+            "prompt": "You find files.",
+            "tools": ["Grep", "Glob"],
+            "model": "sonnet",
+        }
+    }
+    model = config.DEEPSEEK_MODEL
+    for alias in ("HAIKU", "SONNET", "OPUS"):
+        assert options["env"][f"ANTHROPIC_DEFAULT_{alias}_MODEL"] == model
+    assert options["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+    calls = [(ev.payload["name"], ev.payload["parent"]) for ev in durable if ev.type == "tool_call"]
+    assert calls == [("Agent", None), ("Grep", "call-1")]
+    finished = durable[-1]
+    assert finished.type == "run_finished"
+    assert finished.payload["agents_sha"] == load_agents(agents_dir)[1]
+
+
+@pytest.mark.parametrize(
+    "limits, failure",
+    [
+        # The `Agent` call is the first; the subagent's Grep would be the second.
+        (Limits(max_tool_calls=1), {"reason": "max_tool_calls", "limit": 1}),
+        # The fake's first turn costs about $0.012 at the deepseek-flash price.
+        (Limits(max_usd=0.01), {"reason": "budget", "limit_usd": 0.01}),
+        # Under the main turn's cost, over it plus the subagent's call (about $0.006).
+        (Limits(max_usd=0.015), {"reason": "budget", "limit_usd": 0.015}),
+    ],
+)
+async def test_factory_limits_count_subagent_calls(
+    limits: Limits, failure: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A message's limits replace the configured ones, and subagent calls count."""
+    monkeypatch.setattr(config, "DEEPSEEK_MODEL", "deepseek-flash")
+    produced = await _run(ClaudeFactoryHarness(), tmp_path, limits)
+    durable = [ev for ev in produced if ev.rseq is not None]
+    assert [ev.type for ev in durable] == ["tool_call", "run_failed"]
+    assert durable[0].payload["name"] == "Agent"
+    assert failure.items() <= durable[-1].payload.items()
+    if failure["reason"] == "budget":
+        assert durable[-1].payload["cost_usd"] > failure["limit_usd"]
+
+
+async def test_factory_refuses_to_run_without_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "FACTORY_AGENTS_DIR", tmp_path / "missing")
+    with pytest.raises(SandboxError, match="no agent files"):
+        await _run(ClaudeFactoryHarness(), tmp_path)
+
+
+async def test_factory_counts_subagent_usage_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subagent's call is in its transcript only, logged twice under one message
+    id: it is added to the usage and cost once, and reported separately too."""
+    monkeypatch.setattr(config, "DEEPSEEK_MODEL", "deepseek-flash")
+    produced = await _run(ClaudeFactoryHarness(), tmp_path)
+    finished = [ev for ev in produced if ev.rseq is not None][-1].payload
+    main = {k: fake_sdk.TURN_1[k] + fake_sdk.TURN_2[k] for k in fake_sdk.TURN_1}
+    sub = fake_sdk.SUB_CALL
+    assert finished["usage"] == {
+        "input_tokens": main["input_tokens"] + sub["input_tokens"],
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": main["cache_read_input_tokens"],
+        "output_tokens": main["output_tokens"] + sub["output_tokens"],
+    }
+    sub_usd = pricing.cost_usd("deepseek-flash", sub)
+    assert finished["subagent_calls"] == 1
+    assert finished["subagent_cost_usd"] == pytest.approx(sub_usd, abs=1e-6)
+    expected = pricing.cost_usd("deepseek-flash", main) + sub_usd
+    assert finished["cost_usd"] == pytest.approx(expected, abs=1e-6)
