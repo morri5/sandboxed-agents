@@ -68,6 +68,7 @@ class SessionState:
     harness: str | None = None  # the harness the next run uses
     sandbox_name: str | None = None
     sandbox_harness: str | None = None  # the harness the VM was made for (its VmSpec)
+    seed_files: dict[str, str] = field(default_factory=dict)  # extra files, outside the patch
     commit: str | None = None  # the commit an https clone was taken at (None for a fixture)
     workspace: str | None = None  # last saved workspace patch, base64 (see `workspace_saved`)
     message_seq: int | None = None  # the last user message
@@ -111,6 +112,7 @@ def fold(events: list[Event]) -> SessionState:
                 state.session_id = str(event.session_id)
                 state.repo_url = p["repo_url"]
                 state.harness = p["harness"]
+                state.seed_files = p.get("seed_files", {})
             case "user_message":
                 state.transcript.append(Message("user", p["text"]))
                 state.message_seq = event.seq

@@ -4,13 +4,14 @@ Run with `uvicorn lab.api:app` (`make api`).
 """
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from lab import events
 from lab.db import DATABASE_URL, create_pool
@@ -20,10 +21,26 @@ from lab.harnesses import HARNESSES, start_host_services, stop_host_services
 from lab.session import SessionRunner, fork_session
 from lab.state import OPEN, fold
 
+SEED_MAX_BYTES = 1 << 20
+_SEED_PATH = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
+
 
 class NewSession(BaseModel):
     repo_url: str
     harness: str = "scripted"
+    # Extra files for the working tree, kept out of the workspace patch (see `provision`).
+    seed_files: dict[str, str] = {}
+
+    @field_validator("seed_files")
+    @classmethod
+    def _plain_paths(cls, seed: dict[str, str]) -> dict[str, str]:
+        for path in seed:
+            parts = path.split("/")
+            if not _SEED_PATH.fullmatch(path) or ".." in parts or parts[0] == ".git":
+                raise ValueError(f"seed path {path!r} is not a plain repo-relative path")
+        if sum(len(text.encode()) for text in seed.values()) > SEED_MAX_BYTES:
+            raise ValueError(f"seed_files exceed {SEED_MAX_BYTES} bytes")
+        return seed
 
 
 class NewMessage(BaseModel):
@@ -90,7 +107,9 @@ async def create_session(body: NewSession, request: Request) -> dict[str, Any]:
     _known_harness(body.harness)
     pool = request.app.state.pool
     session_id: UUID = await pool.fetchval("SELECT uuidv7()")
-    payload = {"repo_url": body.repo_url, "harness": body.harness}
+    payload: dict[str, Any] = {"repo_url": body.repo_url, "harness": body.harness}
+    if body.seed_files:
+        payload["seed_files"] = body.seed_files
     await events.append(pool, session_id, "session_created", payload)
     await _runner(request, session_id)  # from here on, the runner is the session's only writer
     return {"session_id": str(session_id)}

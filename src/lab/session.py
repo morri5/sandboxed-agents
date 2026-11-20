@@ -207,7 +207,7 @@ class SessionRunner:
         workspace = base64.b64decode(state.workspace) if state.workspace else None
         try:
             sb, commit = await sandbox.provision(
-                name, state.repo_url, harness.vm_spec(), state.commit, workspace
+                name, state.repo_url, harness.vm_spec(), state.commit, workspace, state.seed_files
             )
         except Exception as exc:
             await self._append(
@@ -272,7 +272,9 @@ async def fork_session(pool: asyncpg.Pool, source_id: UUID, at_seq: int) -> UUID
         sb, commit, via = await sandbox.fork(source_vm, name), prefix.commit, "fork"
     else:
         workspace = base64.b64decode(prefix.workspace) if prefix.workspace else None
-        sb, commit = await sandbox.provision(name, prefix.repo_url, spec, prefix.commit, workspace)
+        sb, commit = await sandbox.provision(
+            name, prefix.repo_url, spec, prefix.commit, workspace, prefix.seed_files
+        )
         via = "rebuild"
     payload = {"name": name, "commit": commit, "harness": harness.name, "via": via}
     await events.append(pool, fork_id, "sandbox_attached", payload)

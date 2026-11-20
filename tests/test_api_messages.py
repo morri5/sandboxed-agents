@@ -169,3 +169,46 @@ async def test_out_of_bounds_limits_are_refused(
     assert r.status_code == 422, r.text
     log = await events.read(app.state.pool, uuid.UUID(session_id))
     assert "user_message" not in [e.type for e in log]
+
+
+async def _created(c: httpx.AsyncClient, **body: Any) -> dict[str, Any]:
+    """The `session_created` payload of a new session made with `body`."""
+    r = await c.post("/sessions", json={"repo_url": "fixtures/calc-repo", **body})
+    assert r.status_code == 201, r.text
+    log = await events.read(app.state.pool, uuid.UUID(r.json()["session_id"]))
+    return log[0].payload
+
+
+async def test_seed_files_are_kept_in_session_created(
+    client: tuple[httpx.AsyncClient, RecordingHarness],
+) -> None:
+    c, _ = client
+    seed = {"thoughts/shared/factory/plans/2026-11-20-x.md": "# Plan\n"}
+    assert (await _created(c, seed_files=seed))["seed_files"] == seed
+    # Without a seed the payload stays as it was.
+    assert await _created(c) == {"repo_url": "fixtures/calc-repo", "harness": "scripted"}
+    assert await _created(c, seed_files={}) == await _created(c)
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        {"/etc/passwd": "x"},
+        {"thoughts/../../etc/x": "x"},
+        {"..": "x"},
+        {".git/info/exclude": "x"},
+        {".git": "x"},
+        {"a b.md": "x"},
+        {"a/*.md": "x"},
+        {"a//b.md": "x"},
+        {"a/": "x"},
+        {"": "x"},
+        {"a.md": "x" * (1 << 20), "b.md": "y"},
+    ],
+)
+async def test_bad_seed_files_are_refused(
+    seed: dict[str, str], client: tuple[httpx.AsyncClient, RecordingHarness]
+) -> None:
+    c, _ = client
+    r = await c.post("/sessions", json={"repo_url": "fixtures/calc-repo", "seed_files": seed})
+    assert r.status_code == 422, r.text

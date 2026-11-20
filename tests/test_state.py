@@ -104,3 +104,10 @@ def test_harness_switch_and_native_resume() -> None:
         None,
     )
     assert switched.session == "idle"
+
+
+def test_seed_files_fold() -> None:
+    seed = {"thoughts/shared/factory/research/r.md": "# Research\n"}
+    seeded = ("session_created", {**CREATED[1], "seed_files": seed})
+    assert fold(_log(seeded, MESSAGE)).seed_files == seed
+    assert fold(_log(CREATED, MESSAGE)).seed_files == {}  # an older log has none

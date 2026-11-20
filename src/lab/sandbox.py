@@ -14,6 +14,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import tarfile
 import tempfile
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -181,12 +182,15 @@ async def provision(
     spec: VmSpec,
     commit: str | None = None,
     workspace: bytes | None = None,
+    seed: Mapping[str, str] | None = None,
 ) -> tuple[Sandbox, str | None]:
     """Create the VM `name` (replacing any old one) with a copy of the repo.
 
     Returns the VM and the commit of an https clone. With `workspace` (a patch from
     `save_workspace`) the repo is put back into that state, which is how a lost VM
-    or a fork that cannot use `fork()` is rebuilt.
+    or a fork that cannot use `fork()` is rebuilt. `seed` (repo-relative path to text)
+    adds files to the working tree, listed in `.git/info/exclude` so that they never
+    enter a workspace patch.
 
     Network, memory, env, secrets, mounts and vsock ports come from the harness's `spec`.
     """
@@ -213,6 +217,8 @@ async def provision(
         await sb.fs.write(ARCHIVE_GUEST, archive)
         await _check(sb, _UNPACK)
         await sb.fs.copy_from_host(str(RUNNER_HOST), RUNNER_GUEST)
+        if seed:
+            await _seed(sb, seed)
         if workspace:
             await sb.fs.write(PATCH_GUEST, workspace)
             await _check(sb, f"cd {REPO_DIR} && git apply --whitespace=nowarn {PATCH_GUEST}")
@@ -220,6 +226,19 @@ async def provision(
         await sb.destroy(force=True)  # a VM without its repo must not be reattached later
         raise
     return sb, commit
+
+
+async def _seed(sb: Sandbox, seed: Mapping[str, str]) -> None:
+    """Write the seed files and exclude them from git (the API allows plain paths only)."""
+    dirs = " ".join(shlex.quote(str(Path(p).parent)) for p in seed)
+    excludes = " ".join(shlex.quote(f"/{p}") for p in seed)
+    await _check(
+        sb,
+        f"cd {REPO_DIR} && mkdir -p .git/info {dirs}"
+        f" && printf '%s\\n' {excludes} >> .git/info/exclude",
+    )
+    for path, text in seed.items():
+        await sb.fs.write(f"{REPO_DIR}/{path}", text.encode())
 
 
 async def fork(source: Sandbox, name: str) -> Sandbox:
