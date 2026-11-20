@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await pool.close()
 
 
-app = FastAPI(title="sandboxed-agents-lab", lifespan=lifespan)
+app = FastAPI(title="sandboxed-agents", lifespan=lifespan)
 
 
 async def _runner(request: Request, session_id: UUID) -> SessionRunner:

@@ -1104,7 +1104,7 @@ wheels = [
 ]
 
 [[package]]
-name = "sandboxed-agents-lab"
+name = "sandboxed-agents"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "sandboxed-agents-lab",
+  title: "sandboxed-agents",
   description: "Chat with a repo; the agent works in a microVM.",
 };
 

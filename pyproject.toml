@@ -1,5 +1,5 @@
 [project]
-name = "sandboxed-agents-lab"
+name = "sandboxed-agents"
 version = "0.1.0"
 description = "A small lab for coding agents in per-chat microVMs with an event-sourced session layer"
 readme = "README.md"

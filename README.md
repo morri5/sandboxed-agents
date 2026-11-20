@@ -1,4 +1,4 @@
-# sandboxed-agents-lab
+# sandboxed-agents
 
 A small lab for coding agents that run in per-chat microVMs ([microsandbox](https://github.com/superradcompany/microsandbox)), behind a session layer whose single source of truth is an append-only event log in PostgreSQL.
 
