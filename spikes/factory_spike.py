@@ -1,9 +1,9 @@
 """Spike: does a real slash command, with its subagents, run headless in a VM on DeepSeek?
 
-Runs `research_codebase.md` from `LAB_FACTORY_COMMANDS_DIR` (frontmatter stripped,
+Runs `research_codebase.md` from `FACTORY_COMMANDS_DIR` (frontmatter stripped,
 a short headless contract in front) on `fixtures/factory-repo` through the session
 API with the `claude_factory` harness, whose subagents come from
-`LAB_FACTORY_AGENTS_DIR`. Then it checks what came out (run end, `Agent` calls,
+`FACTORY_AGENTS_DIR`. Then it checks what came out (run end, `Agent` calls,
 a research document in the saved workspace) and compares the cost the run reports
 with the drop in the DeepSeek account balance, to find out whether the reported
 usage includes the subagents' model calls. The balance has cent resolution, so the
@@ -32,7 +32,7 @@ from _common import write_result
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = str(ROOT / "fixtures" / "factory-repo")
-COMMANDS = Path(os.environ.get("LAB_FACTORY_COMMANDS_DIR", "~/.claude/commands")).expanduser()
+COMMANDS = Path(os.environ.get("FACTORY_COMMANDS_DIR", "~/.claude/commands")).expanduser()
 QUESTION = "How is the calculator's add function tested?"
 LIMITS = {"max_tool_calls": 150, "run_timeout_s": 1800, "max_usd": 1.0}
 CONTRACT = """No human is available during this run. Never ask questions or wait for input:

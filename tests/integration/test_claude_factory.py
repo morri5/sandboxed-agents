@@ -29,7 +29,7 @@ REPORT = "thoughts/shared/research/count.md"
 
 async def test_command_with_a_subagent(clean_db: str, calc_repo: str) -> None:
     port = free_port()
-    proc = start_api(clean_db, port, LAB_FACTORY_AGENTS_DIR=str(FIXTURES / "agents"))
+    proc = start_api(clean_db, port, FACTORY_AGENTS_DIR=str(FIXTURES / "agents"))
     api = f"http://127.0.0.1:{port}"
     body = {"repo_url": calc_repo, "harness": "claude_factory"}
     session_id = httpx.post(f"{api}/sessions", json=body).json()["session_id"]

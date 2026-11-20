@@ -5,7 +5,7 @@ The VM is `claude_agent`'s (DeepSeek only, host-scoped key, SDK mount). What the
 runner does differently for this harness:
 
 - The `Agent` tool is allowed, with the subagents defined in the task, parsed from
-  the agent files in `LAB_FACTORY_AGENTS_DIR`. Their tool calls are recorded and
+  the agent files in `FACTORY_AGENTS_DIR`. Their tool calls are recorded and
   counted against the cap like the main agent's, with `parent` set to the `Agent`
   call they belong to, so delegating hides no work.
 - `setting_sources=[]`: no settings, hooks, CLAUDE.md, commands or agents are

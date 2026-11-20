@@ -85,7 +85,7 @@ A could match B's crash behaviour only by moving the loop into a separate worker
 
 Three settings make it safe and make it terminate:
 
-- `setting_sources=[]`. With the SDK default (`None`) the CLI loads user, project and local settings, and project settings can define hooks, which run shell commands from the (untrusted) repo. No settings, hooks, `CLAUDE.md`, commands or agents are loaded from disk; the subagents are passed programmatically (`agents=`), parsed on the host from `LAB_FACTORY_AGENTS_DIR`. Only those agent files cross into the VM, never a personal `CLAUDE.md`, because everything in the VM is sent to DeepSeek.
+- `setting_sources=[]`. With the SDK default (`None`) the CLI loads user, project and local settings, and project settings can define hooks, which run shell commands from the (untrusted) repo. No settings, hooks, `CLAUDE.md`, commands or agents are loaded from disk; the subagents are passed programmatically (`agents=`), parsed on the host from `FACTORY_AGENTS_DIR`. Only those agent files cross into the VM, never a personal `CLAUDE.md`, because everything in the VM is sent to DeepSeek.
 - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. The CLI launched the subagents as background agents on its own (the model did not ask for it) and ended its turn with "agents are still running"; `receive_response()` stops at that first result, so the run finished without its document. With background tasks disabled, subagents run in the foreground and their answers come back as the `Agent` tool result.
 - Every model alias (`haiku`, `sonnet`, `opus`) maps to the DeepSeek model, so agent files written for Claude work unchanged.
 

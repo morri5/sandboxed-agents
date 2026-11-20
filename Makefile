@@ -1,6 +1,10 @@
 .PHONY: lint test test-integration test-chaos spike spike-factory check-names db-up migrate api \
 	claude-sdk grader-deps eval-check eval web-test demo
 
+# Local settings live in .env (gitignored); every target sees them.
+-include .env
+export
+
 PY_SOURCES := spikes src tests scripts
 
 lint:
@@ -28,7 +32,7 @@ spike:
 	cd spikes && uv run python network_spike.py
 	cd spikes && uv run python reattach_spike.py
 
-# research_codebase from LAB_FACTORY_COMMANDS_DIR, with the subagents in LAB_FACTORY_AGENTS_DIR,
+# research_codebase from FACTORY_COMMANDS_DIR, with the subagents in FACTORY_AGENTS_DIR,
 # on fixtures/factory-repo through the claude_factory harness (DeepSeek, a few cents). Compares
 # the reported cost with the DeepSeek balance. Starts its own API: stop `make api` first.
 spike-factory: migrate claude-sdk
