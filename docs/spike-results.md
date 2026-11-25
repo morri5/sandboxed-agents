@@ -19,6 +19,7 @@ Measured on 2026-11-16 in one full run of `make spike` (after the host firewall 
 | Secret proxy with the Agent SDK CLI and DeepSeek | **Works.** The guest only sees a placeholder; DeepSeek accepts the substituted key. |
 | Reattach after the owner is SIGKILLed | **Works** with `detached=True` plus `detach()`. |
 | B-local: reach Ollama on 127.0.0.1 from a VM | **Works** through both paths tried. |
+| DeepSeek behind the self-hosted Langfuse AI Gateway | **Works.** Every model call is recorded with tokens and cost; the costs match the harness to the cent. |
 
 ## VM lifecycle (`spikes/sandbox_spike.py`)
 
@@ -144,3 +145,27 @@ Measured on 2026-11-16 while building `claude_agent` (microsandbox 0.7.15, `clau
 | First run in a fresh VM, a one-line answer (`run_finished.usage`) | 10 784 input, 183 output tokens, about $0.0035 at peak prices |
 | Next run with the SDK's own session resumed | 235 input, 10 752 cache read, 39 output tokens |
 | Budget below one turn (`LAB_MAX_USD_PER_RUN=0.00005`) | `run_failed{reason: "budget"}` after the first turn (10 723 input, 110 output tokens). That turn had issued two tool calls at once: the first (`ls`) still ran, the second was rejected by the interrupt |
+
+## DeepSeek behind the Langfuse AI Gateway
+
+Measured on 2026-11-25 with Langfuse and the gateway 4.86.0 (self-hosted, `compose.yaml` of software-factory), `LAB_MODEL_GATEWAY=http://host.microsandbox.internal:3031/anthropic`, and one full factory run (research, plan, implement, validate) on a playground issue with `deepseek-flash`.
+
+Setup:
+
+- An Anthropic-type connection named `deepseek`, base URL `https://api.deepseek.com/anthropic`. The SDK speaks the Anthropic Messages API, so the gateway only forwards; no format translation.
+- Ingestion mode **Usage**: tokens and cost only, no input or output.
+- A project model definition `deepseek-flash`, pattern `(?i)^(deepseek:)?deepseek-flash$`, priced per token on the keys the gateway reports: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Generic `input`/`output` keys would not match.
+- The VM holds only the gateway key, as `ANTHROPIC_AUTH_TOKEN`, substituted by the secret proxy over plain HTTP to the host port (`require_tls_identity=False`). Its only egress rule is that port.
+
+| Question | Result |
+|---|---|
+| Model discovery | **Fails.** DeepSeek has no `/anthropic/v1/models` (404), so the UI shows "Models could not be loaded" and hides "Add custom model". Adding `deepseek-flash` as a custom model through the web app's own tRPC mutation (`aiGateway.addConnectionCustomModel`) works, and the gateway routes `deepseek:deepseek-flash` despite the discovery error |
+| Secret substitution over plain HTTP to `host.microsandbox.internal` | **Works.** Every stage finished `ok` |
+| Generations recorded | 67 for the run (research 31, plan 9, implement 19, validate 8), one per model call, main agent and subagents alike; subagent calls are not linked to their parent |
+| Content recorded | None: input and output are empty on every generation |
+| Langfuse cost against the stage's `cost_usd` | Identical per stage: research $0.094494, plan $0.028122, implement $0.027511, validate $0.016880. The token sums (input, cache read, output) are identical too |
+| Latency | Time to first byte through the gateway: p50 0.53 s, p90 0.67 s over 71 calls. The gateway's own overhead was **not measured** separately |
+| DeepSeek key exposure | Not in the VM spec, nor in the factory's or the API's logs. It sits encrypted in Langfuse (`ENCRYPTION_KEY`). An old direct-mode sandbox in microsandbox's host database still held it in its config; it was removed |
+| Licence | MIT (`ai-gateway/Cargo.toml` of langfuse/langfuse, outside the `ee/` directories) |
+| Known limitations | Beta; inputs over 5 MiB are not recorded; one trace per model call; 1-hour cache writes are priced at the 5-minute rate for Anthropic (DeepSeek reports no cache writes, so it does not apply here) |
+| Versions | Gateway and web must run the same version: `:4` resolved to web 4.83.0 and gateway 4.86.0, so the tag is pinned |
