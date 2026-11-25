@@ -29,6 +29,11 @@ SCRIPTED_STEP_DELAY_S = _int("LAB_SCRIPTED_STEP_DELAY_S", 0)
 DEEPSEEK_MODEL = os.environ.get("LAB_DEEPSEEK_MODEL", "deepseek-flash")
 # Spend limit of one `claude_agent` run, from token usage and `pricing.py`: reason "budget".
 MAX_USD_PER_RUN = float(os.environ.get("LAB_MAX_USD_PER_RUN", "0.50"))
+# Optional: the Langfuse AI gateway in front of DeepSeek, as the VM reaches it (for example
+# `http://host.microsandbox.internal:3031/anthropic`). Unset, the VM calls DeepSeek directly.
+MODEL_GATEWAY = os.environ.get("LAB_MODEL_GATEWAY", "")
+# The gateway's DeepSeek connection: its model IDs are `<connection>:<model>`.
+GATEWAY_CONNECTION = os.environ.get("LAB_GATEWAY_CONNECTION", "deepseek")
 
 # Subagents of the `claude_factory` harness: every `*.md` here (Claude Code agent files,
 # frontmatter plus prompt) becomes one. Read on every run, never mounted into the VM.

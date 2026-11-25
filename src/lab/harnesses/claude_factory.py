@@ -27,7 +27,7 @@ from microsandbox import Sandbox
 
 from lab import config, pricing
 from lab.events import AgentEvent, Limits, Message
-from lab.harnesses.claude_agent import ClaudeAgentHarness
+from lab.harnesses.claude_agent import ClaudeAgentHarness, sdk_model
 from lab.sandbox import REPO_DIR, SandboxError, VmSpec, exec_runner
 
 SYSTEM_PROMPT = f"""You work on a git repository at {REPO_DIR}, inside an isolated Linux VM
@@ -96,7 +96,7 @@ class ClaudeFactoryHarness:
             "transcript": [asdict(m) for m in transcript],
             "resume": None,
             "system_prompt": SYSTEM_PROMPT,
-            "model": config.DEEPSEEK_MODEL,
+            "model": sdk_model(),
             "price": pricing.PRICES[config.DEEPSEEK_MODEL],
             "budget_usd": limits.max_usd or config.MAX_USD_PER_RUN,
             "max_tool_calls": limits.max_tool_calls or config.MAX_TOOL_CALLS,

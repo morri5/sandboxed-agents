@@ -277,6 +277,9 @@ Read from the environment when the API starts (`src/lab/config.py`).
 | `DEEPSEEK_API_KEY` | none | DeepSeek key for `claude_agent`; it only reaches microsandbox's host proxy, never a VM |
 | `LAB_DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek model of `claude_agent` (`deepseek-v4-pro` is the strong option); must be in `src/lab/pricing.py` |
 | `LAB_MAX_USD_PER_RUN` | `0.50` | Spend limit of one `claude_agent` run, at DeepSeek's peak prices; then `run_failed{reason: "budget"}` |
+| `LAB_MODEL_GATEWAY` | none | Experimental: the Langfuse AI gateway as the VM reaches it (`http://host.microsandbox.internal:3031/anthropic`). Set, `claude_agent` and `claude_factory` VMs reach only that host port instead of `api.deepseek.com`, and `DEEPSEEK_API_KEY` is not needed: the DeepSeek key lives in the gateway's connection |
+| `LAB_GATEWAY_KEY` | none | Gateway key for `LAB_MODEL_GATEWAY`; like the DeepSeek key, only a placeholder enters the VM |
+| `LAB_GATEWAY_CONNECTION` | `deepseek` | Name of the gateway's DeepSeek connection; the SDK asks for `<connection>:<LAB_DEEPSEEK_MODEL>` |
 | `FACTORY_AGENTS_DIR` | `~/.claude/agents` | Claude Code agent files (`*.md`) that become the subagents of `claude_factory`, read on every run. Only these files reach the VM (and DeepSeek), never a `CLAUDE.md` or settings |
 | `LAB_SCRIPTED_STEP_DELAY_S` | `0` | Pause before each step of the `scripted` agent, so the chaos tests can kill the API mid-run |
 
